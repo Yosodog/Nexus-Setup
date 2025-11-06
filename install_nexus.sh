@@ -325,7 +325,7 @@ run "supervisorctl start nexus-subs:* || true"
 run "supervisorctl status || true"
 
 # Cron (www-data scheduler)
-CRON_LINE="* * * * * www-data /usr/bin/php ${APP_PATH}/artisan schedule:run >> /dev/null 2>&1"
+CRON_LINE="* * * * * su -s /bin/bash www-data -c "/usr/bin/php /var/www/nexus/artisan schedule:run >> /var/www/nexus/storage/logs/cron.log 2>&1""
 if ! grep -Fq "$CRON_LINE" /etc/crontab; then
   run "bash -c 'echo \"$CRON_LINE\" >> /etc/crontab'"
 fi

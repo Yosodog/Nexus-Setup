@@ -284,7 +284,7 @@ WORKER_CONF="/etc/supervisor/conf.d/nexus-worker.conf"
 WORKER_CONTENT="[program:nexus-worker]
 process_name=%(program_name)s_%(process_num)02d
 directory=${APP_PATH}
-command=/usr/bin/php artisan queue:work --sleep=3 --tries=3 --max-time=3600
+command=/usr/bin/php artisan queue:work --queue=default --sleep=3 --tries=3 --max-time=3600
 autostart=true
 autorestart=true
 stopasgroup=true
@@ -296,6 +296,25 @@ stdout_logfile=${APP_PATH}/storage/logs/worker.log
 stopwaitsecs=10
 "
 if $DRY_RUN; then echo "[dry-run] Write $WORKER_CONF"; else printf "%s" "$WORKER_CONTENT" > "$WORKER_CONF"; fi
+
+# Sync queue worker (heavy nation/war sync jobs)
+WORKER_SYNC_CONF="/etc/supervisor/conf.d/nexus-worker-sync.conf"
+WORKER_SYNC_CONTENT="[program:nexus-worker-sync]
+process_name=%(program_name)s_%(process_num)02d
+directory=${APP_PATH}
+command=/usr/bin/php artisan queue:work --queue=sync --sleep=3 --tries=3 --max-time=3600
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+numprocs=1
+user=www-data
+redirect_stderr=true
+stdout_logfile=${APP_PATH}/storage/logs/worker-sync.log
+stopwaitsecs=10
+"
+if $DRY_RUN; then echo "[dry-run] Write $WORKER_SYNC_CONF"; else printf "%s" "$WORKER_SYNC_CONTENT" > "$WORKER_SYNC_CONF"; fi
+
 
 # Subs (entry in src/index.js)
 SUBS_CONF="/etc/supervisor/conf.d/nexus-subs.conf"
@@ -321,6 +340,7 @@ run "chown -R www-data:www-data ${APP_PATH}"
 run "supervisorctl reread"
 run "supervisorctl update"
 run "supervisorctl start nexus-worker:* || true"
+run "supervisorctl start nexus-worker-sync:* || true"
 run "supervisorctl start nexus-subs:* || true"
 run "supervisorctl status || true"
 

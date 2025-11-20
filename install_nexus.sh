@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Nexus AMS installer (multi-distro)
-# Version: 2.0.0
+# Version: 2.1.0
 
 set -euo pipefail
 
@@ -8,13 +8,11 @@ set -euo pipefail
 # CLI FLAGS
 # ---------------------------------------------------------------------------
 DRY_RUN=false
-FORCE_INTERACTIVE=false
 FORCE_NON_INTERACTIVE=false
 
 for arg in "${@:-}"; do
   case "$arg" in
-    --dry-run)        DRY_RUN=true ;;
-    --interactive)    FORCE_INTERACTIVE=true ;;
+    --dry-run)         DRY_RUN=true ;;
     --non-interactive) FORCE_NON_INTERACTIVE=true ;;
   esac
 done
@@ -43,7 +41,7 @@ die() { err "$1"; exit 1; }
 require_root() { [[ $EUID -eq 0 ]] || die "Run as root (sudo)."; }
 
 # ---------------------------------------------------------------------------
-# OS DETECTION & PKG HELPERS
+# OS DETECTION & PKG HELPERS (Ubuntu/Debian + RHEL/Amazon Linux)
 # ---------------------------------------------------------------------------
 detect_os() {
   [[ -f /etc/os-release ]] || die "/etc/os-release not found. Unsupported OS."
@@ -150,7 +148,7 @@ configure_redis_maxmemory() {
 }
 
 # ---------------------------------------------------------------------------
-# ASCII BANNER (you can replace this)
+# ASCII BANNER
 # ---------------------------------------------------------------------------
 print_banner() {
 cat <<'BANNER'
@@ -170,6 +168,7 @@ BANNER
 
 # ---------------------------------------------------------------------------
 # INSTALL PROFILES (sections toggles)
+# INSTALL PROFILES (section toggles)
 # ---------------------------------------------------------------------------
 INSTALL_BASE=true
 INSTALL_SWAP=true
@@ -210,7 +209,7 @@ set_profile_flags() {
     web-only)
       INSTALL_DB=false
       INSTALL_SUBS=false
-      ;; # App + Web (remote DB), no Subs
+      ;;
     db-only)
       INSTALL_PHP=false
       INSTALL_NGINX=false
@@ -239,7 +238,7 @@ set_profile_flags() {
 }
 
 # ---------------------------------------------------------------------------
-# INTERACTIVE SETUP (when install.env missing or --interactive)
+# INTERACTIVE SETUP (default mode)
 # ---------------------------------------------------------------------------
 ENV_PATH="./install.env"
 
@@ -247,7 +246,8 @@ interactive_prompt() {
   print_banner
 
   echo ""
-  echo "No install.env found. Running interactive setup..."
+  echo "Interactive setup (this will write/overwrite install.env in the current directory)."
+  echo ""
 
   read -r -p "Domain for Nexus AMS (e.g. nexus.example.com): " DOMAIN
   DOMAIN="${DOMAIN:-nexus.local}"
@@ -255,8 +255,9 @@ interactive_prompt() {
   read -r -p "App path [/var/www/nexus]: " APP_PATH
   APP_PATH="${APP_PATH:-/var/www/nexus}"
 
-  read -r -p "Subs path [/var/www/nexus-subs]: " SUBS_PATH
-  SUBS_PATH="${SUBS_PATH:-/var/www/nexus-subs}"
+  # Subs default changed to /var/nexus-subs (not under www)
+  read -r -p "Subs path [/var/nexus-subs]: " SUBS_PATH
+  SUBS_PATH="${SUBS_PATH:-/var/nexus-subs}"
 
   read -r -p "App name [Nexus AMS]: " APP_NAME
   APP_NAME="${APP_NAME:-Nexus AMS}"
@@ -267,11 +268,11 @@ interactive_prompt() {
 
   echo ""
   echo "Install profile:"
-  echo "  [1] full                (App + Web + DB + Subs)"
-  echo "  [2] app-web-subs-remote-db (App + Web + Subs, DB on remote host)"
-  echo "  [3] web-only            (App + Web, DB on remote host, no Subs)"
-  echo "  [4] db-only             (DB server only)"
-  echo "  [5] subs-only           (Subscriptions worker only)"
+  echo "  [1] full                      (App + Web + DB + Subs)"
+  echo "  [2] app-web-subs-remote-db    (App + Web + Subs, DB on remote host)"
+  echo "  [3] web-only                  (App + Web, DB on remote host, no Subs)"
+  echo "  [4] db-only                   (DB server only)"
+  echo "  [5] subs-only                 (Subscriptions worker only)"
   read -r -p "Select [1-5]: " profile_choice
 
   case "$profile_choice" in
@@ -283,11 +284,25 @@ interactive_prompt() {
     *) INSTALL_PROFILE="full" ;;
   esac
 
-  # Database details (used even if DB is remote)
+  # Swap config
+  echo ""
+  echo "Swap configuration:"
+  read -r -p "Enable swap creation? [Y/n]: " enable_swap_ans
+  if [[ "${enable_swap_ans,,}" == "n" ]]; then
+    ENABLE_SWAP="false"
+    SWAP_SIZE_GB=""
+  else
+    ENABLE_SWAP="true"
+    read -r -p "Swap size in GB [4]: " SWAP_SIZE_GB
+    SWAP_SIZE_GB="${SWAP_SIZE_GB:-4}"
+  fi
+
+  # Database details
   echo ""
   echo "Database configuration (for Laravel app):"
   if [[ "$INSTALL_PROFILE" == "full" || "$INSTALL_PROFILE" == "db-only" ]]; then
     DB_HOST="127.0.0.1"
+    echo "DB host set to 127.0.0.1 for profile $INSTALL_PROFILE"
   else
     read -r -p "DB host [127.0.0.1]: " DB_HOST
     DB_HOST="${DB_HOST:-127.0.0.1}"
@@ -321,7 +336,10 @@ interactive_prompt() {
   # Nexus / PW config
   echo ""
   echo "Nexus / PW configuration (you can leave blank and edit later in .env):"
-  read -r -p "NEXUS_API_URL (e.g. https://nexus.example.com/api): " NEXUS_API_URL
+  local default_nexus_api_url="https://example.com/api/v1/subs"
+  read -r -p "NEXUS_API_URL [${default_nexus_api_url}]: " NEXUS_API_URL
+  NEXUS_API_URL="${NEXUS_API_URL:-$default_nexus_api_url}"
+
   read -r -p "NEXUS_API_TOKEN: " NEXUS_API_TOKEN
   read -r -p "PW_API_KEY: " PW_API_KEY
   read -r -p "PW_API_MUTATION_KEY: " PW_API_MUTATION_KEY
@@ -339,12 +357,20 @@ interactive_prompt() {
   read -r -p "Create initial admin user now? [Y/n]: " create_admin_ans
   if [[ "${create_admin_ans,,}" == "n" ]]; then
     CREATE_ADMIN_USER="false"
+    ADMIN_NAME=""
+    ADMIN_EMAIL=""
+    ADMIN_PASSWORD=""
+    ADMIN_NATION_ID="0"
+    ADMIN_ROLE_ID="1"
   else
     CREATE_ADMIN_USER="true"
     read -r -p "Admin name [Nexus Admin]: " ADMIN_NAME
     ADMIN_NAME="${ADMIN_NAME:-Nexus Admin}"
-    read -r -p "Admin email [admin@${DOMAIN}]: " ADMIN_EMAIL
-    ADMIN_EMAIL="${ADMIN_EMAIL:-admin@${DOMAIN}}"
+
+    local default_admin_email="admin@${DOMAIN}"
+    read -r -p "Admin email [${default_admin_email}]: " ADMIN_EMAIL
+    ADMIN_EMAIL="${ADMIN_EMAIL:-$default_admin_email}"
+
     read -r -p "Admin password [change-me]: " ADMIN_PASSWORD
     ADMIN_PASSWORD="${ADMIN_PASSWORD:-change-me}"
     read -r -p "Admin nation ID (numeric, default 0): " ADMIN_NATION_ID
@@ -353,9 +379,38 @@ interactive_prompt() {
     ADMIN_ROLE_ID="${ADMIN_ROLE_ID:-1}"
   fi
 
-  # Certbot contact
-  read -r -p "Certbot admin email [${ADMIN_EMAIL:-admin@${DOMAIN}}]: " CERTBOT_EMAIL
-  CERTBOT_EMAIL="${CERTBOT_EMAIL:-${ADMIN_EMAIL:-admin@${DOMAIN}}}"
+  # Certbot contact (default placeholder)
+  echo ""
+  local default_certbot_email="yourname@example.com"
+  read -r -p "Certbot admin email [${default_certbot_email}]: " CERTBOT_EMAIL
+  CERTBOT_EMAIL="${CERTBOT_EMAIL:-$default_certbot_email}"
+
+  # Show summary before writing env / running
+  echo ""
+  echo "======== CONFIG SUMMARY ========"
+  echo "Domain:            $DOMAIN"
+  echo "App path:          $APP_PATH"
+  echo "Subs path:         $SUBS_PATH"
+  echo "Profile:           $INSTALL_PROFILE"
+  echo "Enable swap:       ${ENABLE_SWAP:-true}"
+  echo "Swap size (GB):    ${SWAP_SIZE_GB:-4}"
+  echo "DB host:           $DB_HOST"
+  echo "DB name:           $DB_DATABASE"
+  echo "DB user:           $DB_USERNAME"
+  echo "Use Redis:         $USE_REDIS"
+  echo "Redis maxmemory:   ${REDIS_MAX_MEMORY:-N/A}"
+  echo "NEXUS_API_URL:     $NEXUS_API_URL"
+  echo "Enable snapshots:  $ENABLE_SNAPSHOTS"
+  echo "Create admin user: $CREATE_ADMIN_USER"
+  echo "Admin email:       ${ADMIN_EMAIL:-N/A}"
+  echo "Certbot email:     $CERTBOT_EMAIL"
+  echo "================================"
+  echo ""
+
+  read -r -p "Proceed with installation using these settings? [y/N]: " confirm_run
+  if [[ "${confirm_run,,}" != "y" ]]; then
+    die "Installation aborted by user."
+  fi
 
   # Write install.env for future runs
   if ! $DRY_RUN; then
@@ -368,6 +423,9 @@ APP_NAME="$APP_NAME"
 APP_URL="$APP_URL"
 
 INSTALL_PROFILE="$INSTALL_PROFILE"
+
+ENABLE_SWAP="$ENABLE_SWAP"
+SWAP_SIZE_GB="$SWAP_SIZE_GB"
 
 DB_HOST="$DB_HOST"
 DB_DATABASE="$DB_DATABASE"
@@ -396,30 +454,31 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# ENV LOADING
+# ENV LOADING (interactive default, --non-interactive uses existing env)
 # ---------------------------------------------------------------------------
 require_root
 detect_os
 detect_web_user
 
-log "Nexus AMS Installer v2.0.0"
+log "Nexus AMS Installer v2.1.0"
 $DRY_RUN && warn "Dry-run mode enabled. Commands will be printed but not executed."
 
-if [[ -f "$ENV_PATH" && $FORCE_INTERACTIVE == false && $FORCE_NON_INTERACTIVE == false ]]; then
-  log "Found install.env, running non-interactive using its values."
-  # shellcheck disable=SC1090
-  source "$ENV_PATH"
-elif [[ -f "$ENV_PATH" && $FORCE_INTERACTIVE == false && $FORCE_NON_INTERACTIVE == true ]]; then
-  log "Non-interactive mode forced; using existing install.env"
+if $FORCE_NON_INTERACTIVE; then
+  [[ -f "$ENV_PATH" ]] || die "install.env not found. It is required for --non-interactive mode."
+  log "Non-interactive mode: using existing install.env"
   # shellcheck disable=SC1090
   source "$ENV_PATH"
 else
+  # Interactive is default
   interactive_prompt
   # shellcheck disable=SC1090
   source "$ENV_PATH"
 fi
 
-: "${CERTBOT_EMAIL:=${ADMIN_EMAIL:-root@localhost}}"
+# Defaults for new fields if missing (for non-interactive legacy envs)
+: "${ENABLE_SWAP:=true}"
+: "${SWAP_SIZE_GB:=4}"
+: "${CERTBOT_EMAIL:=yourname@example.com}"
 
 set_profile_flags "${INSTALL_PROFILE:-full}"
 
@@ -449,9 +508,17 @@ stage_base() {
 }
 
 stage_swap() {
-  log "Stage 2: Swap (4G, idempotent)"
+  if [[ "${ENABLE_SWAP,,}" != "true" ]]; then
+    log "Stage 2: Swap creation disabled (ENABLE_SWAP=false)"
+    return
+  fi
+
+  log "Stage 2: Swap (${SWAP_SIZE_GB}G, idempotent)"
+
   if ! swapon --show | grep -q "/swapfile"; then
-    run "fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress"
+    local size_gb="${SWAP_SIZE_GB:-4}"
+    local size_str="${size_gb}G"
+    run "fallocate -l ${size_str} /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=$((size_gb * 1024)) status=progress"
     run "chmod 600 /swapfile"
     run "mkswap /swapfile"
     run "swapon /swapfile"
@@ -536,6 +603,11 @@ stage_clone_apps() {
 }
 
 stage_node_composer() {
+  if ! $INSTALL_APP && ! $INSTALL_SUBS; then
+    log "Stage 5: Node & Composer skipped (no app/subs install)"
+    return
+  fi
+
   log "Stage 5: Node LTS & Composer"
 
   if $IS_DEBIAN; then
@@ -932,7 +1004,7 @@ $INSTALL_SWAP  && stage_swap
 $INSTALL_PHP   && stage_php_web_stack
 stage_redis_install_and_config
 stage_clone_apps
-$INSTALL_APP && stage_node_composer
+stage_node_composer
 stage_database_setup
 stage_laravel_backend
 stage_frontend_build
@@ -964,6 +1036,8 @@ echo "Database:            ${DB_DATABASE:-N/A}"
 echo "DB user:             ${DB_USERNAME:-N/A}"
 echo "Redis enabled:       ${USE_REDIS:-false}"
 echo "Redis maxmemory:     ${REDIS_MAX_MEMORY:-N/A}"
+echo "Swap enabled:        ${ENABLE_SWAP:-true}"
+echo "Swap size (GB):      ${SWAP_SIZE_GB:-4}"
 echo "Certbot email:       ${CERTBOT_EMAIL:-N/A}"
 echo "Cron installed:      $( $CONFIGURE_CRON && $INSTALL_APP && echo yes || echo no )"
 echo "Supervisor processes:"

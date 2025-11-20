@@ -772,7 +772,7 @@ stage_nginx_tls() {
     return
   fi
 
-  log "Stage 10: Nginx vhost for $DOMAIN + Certbot"
+  log "Stage 10: Nginx vhost for $DOMAIN + Certbot (HTTP first)"
 
   if $IS_DEBIAN; then
     NGINX_SITE="/etc/nginx/sites-available/nexus.conf"
@@ -782,43 +782,37 @@ stage_nginx_tls() {
     NGINX_ENABLED="$NGINX_SITE"
   fi
 
+  # HTTP-only vhost so nginx can start before certbot
   local SITE_BLOCK="
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 80;
+    listen [::]:80;
     server_name ${DOMAIN};
 
     root ${APP_PATH}/public;
     index index.php index.html index.htm;
 
-    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-    include /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
-    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
 
     location ~ \.php$ {
         include fastcgi_params;
         fastcgi_pass unix:${PHP_FPM_SOCK};
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
-        include fastcgi.conf;
     }
 
-    location ~ /\. { deny all; }
+    location ~ /\. {
+        deny all;
+    }
 
     client_max_body_size 64M;
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
     gzip_vary on;
 }
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${DOMAIN};
-    return 301 https://\$host\$request_uri;
-}
 "
+
   if $DRY_RUN; then
     echo "[dry-run] Write Nginx site to $NGINX_SITE"
   else
@@ -831,20 +825,23 @@ server {
     fi
   fi
 
+  # Test and reload HTTP-only config
   run "nginx -t"
   run "systemctl reload nginx"
 
-  # Certbot
+  # Install certbot
   if $IS_DEBIAN; then
     pkg_install "certbot python3-certbot-nginx"
   else
-    pkg_install "certbot python3-certbot-nginx || true"
+    pkg_install "certbot python3-certbot-nginx" || true
   fi
 
+  # Issue cert & let certbot modify nginx config for SSL/redirect
   run "certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL --redirect || true"
   run "certbot renew --dry-run || true"
   run "nginx -t && systemctl reload nginx"
 }
+
 
 stage_supervisor() {
   if ! $CONFIGURE_SUPERVISOR; then
@@ -1003,8 +1000,21 @@ stage_redis_install_and_config() {
     configure_redis_maxmemory "$REDIS_MAX_MEMORY"
   fi
 
-  run "systemctl enable --now redis* || systemctl enable --now redis || true"
+  # Figure out which unit to enable
+  local svc=""
+  if systemctl list-unit-files | grep -q "^redis-server\.service"; then
+    svc="redis-server"
+  elif systemctl list-unit-files | grep -q "^redis\.service"; then
+    svc="redis"
+  fi
+
+  if [[ -n "$svc" ]]; then
+    run "systemctl enable --now ${svc} || true"
+  else
+    warn "Could not find a Redis systemd unit (redis-server/redis). Please enable Redis manually if needed."
+  fi
 }
+
 
 # ---------------------------------------------------------------------------
 # RUN STAGES

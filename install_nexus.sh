@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+export DEBIAN_FRONTEND=noninteractive
+
 # ---------------------------------------------------------------------------
 # CLI FLAGS
 # ---------------------------------------------------------------------------
@@ -56,7 +58,7 @@ detect_os() {
 
   if [[ "$OS_ID" == "ubuntu" || "$OS_ID" == "debian" || "$OS_LIKE" == *"debian"* ]]; then
     IS_DEBIAN=true
-    PKG_MGR="apt"
+    PKG_MGR="apt-get"
   elif [[ "$OS_ID" == "amzn" || "$OS_LIKE" == *"rhel"* || "$OS_LIKE" == *"fedora"* || "$OS_LIKE" == *"centos"* ]]; then
     IS_RHEL=true
     if command -v dnf >/dev/null 2>&1; then
@@ -73,7 +75,9 @@ detect_os() {
 
 pkg_update() {
   if $IS_DEBIAN; then
-    run "apt update && apt upgrade -y"
+    run "$PKG_MGR update && $PKG_MGR -y \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold upgrade"
   else
     run "$PKG_MGR -y update || true"
   fi
@@ -81,7 +85,7 @@ pkg_update() {
 
 pkg_install() {
   if $IS_DEBIAN; then
-    run "apt install -y $*"
+    run "$PKG_MGR install -y $*"
   else
     run "$PKG_MGR install -y $*"
   fi
@@ -167,7 +171,6 @@ BANNER
 }
 
 # ---------------------------------------------------------------------------
-# INSTALL PROFILES (sections toggles)
 # INSTALL PROFILES (section toggles)
 # ---------------------------------------------------------------------------
 INSTALL_BASE=true
@@ -255,7 +258,7 @@ interactive_prompt() {
   read -r -p "App path [/var/www/nexus]: " APP_PATH
   APP_PATH="${APP_PATH:-/var/www/nexus}"
 
-  # Subs default changed to /var/nexus-subs (not under www)
+  # Subs default path not under www
   read -r -p "Subs path [/var/nexus-subs]: " SUBS_PATH
   SUBS_PATH="${SUBS_PATH:-/var/nexus-subs}"
 
@@ -545,7 +548,7 @@ stage_php_web_stack() {
   if $IS_DEBIAN; then
     if ! ls /etc/apt/sources.list.d/ 2>/dev/null | grep -q "ondrej-ubuntu-php"; then
       run "add-apt-repository ppa:ondrej/php -y"
-      run "apt update"
+      run "apt-get update"
     fi
     pkg_install "php8.4 php8.4-cli php8.4-fpm php8.4-mysql php8.4-xml php8.4-curl php8.4-mbstring php8.4-zip php8.4-bcmath"
     pkg_install "php-redis" || true
@@ -638,12 +641,16 @@ stage_database_setup() {
     fi
   fi
 
-  run "$MYSQL_CMD <<SQL
-CREATE DATABASE IF NOT EXISTS \`$DB_DATABASE\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '$DB_USERNAME'@'%' IDENTIFIED BY '$DB_PASSWORD';
-GRANT ALL PRIVILEGES ON \`$DB_DATABASE\`.* TO '$DB_USERNAME'@'%';
+  if $DRY_RUN; then
+    echo "[dry-run] Would create database '${DB_DATABASE}' and user '${DB_USERNAME}' with privileges."
+  else
+    $MYSQL_CMD <<SQL
+CREATE DATABASE IF NOT EXISTS ${DB_DATABASE} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${DB_USERNAME}'@'%' IDENTIFIED BY '${DB_PASSWORD}';
+GRANT ALL PRIVILEGES ON ${DB_DATABASE}.* TO '${DB_USERNAME}'@'%';
 FLUSH PRIVILEGES;
-SQL"
+SQL
+  fi
 }
 
 set_env_kv() {

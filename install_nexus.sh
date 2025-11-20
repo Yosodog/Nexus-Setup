@@ -5,6 +5,8 @@
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+export COMPOSER_ALLOW_SUPERUSER=1
+export DEBIAN_FRONTEND=noninteractive
 
 # ---------------------------------------------------------------------------
 # CLI FLAGS
@@ -482,6 +484,7 @@ fi
 : "${ENABLE_SWAP:=true}"
 : "${SWAP_SIZE_GB:=4}"
 : "${CERTBOT_EMAIL:=yourname@example.com}"
+: "${NODE_BUILD_MAX_OLD_SPACE:=2048}"
 
 set_profile_flags "${INSTALL_PROFILE:-full}"
 
@@ -715,7 +718,7 @@ stage_laravel_backend() {
 
   run "chmod 600 $APP_PATH/.env"
 
-  run "cd $APP_PATH && composer install --no-dev --optimize-autoloader"
+  run "cd $APP_PATH && composer install --no-dev --optimize-autoloader --no-interaction"
   run "cd $APP_PATH && php artisan key:generate --force"
   run "cd $APP_PATH && php artisan migrate --force"
   run "cd $APP_PATH && php artisan db:seed --force"
@@ -732,7 +735,10 @@ stage_frontend_build() {
   if ! $DRY_RUN; then
     find "$APP_PATH/node_modules" -path "*/@esbuild/*/bin/esbuild" -type f -exec chmod +x {} \; 2>/dev/null || true
   fi
-  run "cd $APP_PATH && npm run build"
+
+  # Use increased heap for Vite build
+  run "cd $APP_PATH && NODE_OPTIONS=\"--max-old-space-size=${NODE_BUILD_MAX_OLD_SPACE}\" npm run build"
+
   run "chown -R $WEB_USER:$WEB_USER $APP_PATH/public/build"
 }
 

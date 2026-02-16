@@ -146,8 +146,10 @@ configure_redis_maxmemory() {
     echo "maxmemory ${maxmem}" >> "$conf"
   fi
 
-  if ! grep -qE '^[[:space:]]*maxmemory-policy ' "$conf"; then
-    echo "maxmemory-policy allkeys-lru" >> "$conf"
+  if grep -qE '^[[:space:]]*maxmemory-policy ' "$conf"; then
+    sed -i "s/^[[:space:]]*maxmemory-policy .*/maxmemory-policy noeviction/" "$conf"
+  else
+    echo "maxmemory-policy noeviction" >> "$conf"
   fi
 
   systemctl restart redis* 2>/dev/null || systemctl restart redis || true

@@ -152,6 +152,12 @@ configure_redis_maxmemory() {
     echo "maxmemory-policy noeviction" >> "$conf"
   fi
 
+  if grep -qE '^[[:space:]]*appendonly ' "$conf"; then
+    sed -i "s/^[[:space:]]*appendonly .*/appendonly yes/" "$conf"
+  else
+    echo "appendonly yes" >> "$conf"
+  fi
+
   systemctl restart redis* 2>/dev/null || systemctl restart redis || true
 }
 

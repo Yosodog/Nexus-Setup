@@ -545,11 +545,52 @@ stage_swap() {
 detect_php_fpm_socket() {
   if $IS_DEBIAN; then
     local ver
-    ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.4")"
+    ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.5")"
     PHP_FPM_SOCK="/run/php/php${ver}-fpm.sock"
   else
     PHP_FPM_SOCK="/run/php-fpm/www.sock"
   fi
+}
+
+configure_php_fpm_guardrails() {
+  local fpm_binary fpm_pool_dir fpm_service php_version slowlog_path
+
+  if $IS_DEBIAN; then
+    php_version="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+    fpm_binary="php-fpm${php_version}"
+    fpm_pool_dir="/etc/php/${php_version}/fpm/pool.d"
+    fpm_service="php${php_version}-fpm"
+    slowlog_path="/var/log/php${php_version}-fpm-slow.log"
+  else
+    fpm_binary="php-fpm"
+    fpm_pool_dir="/etc/php-fpm.d"
+    fpm_service="php-fpm"
+    slowlog_path="/var/log/php-fpm-slow.log"
+  fi
+
+  if [[ ! -d "$fpm_pool_dir" ]]; then
+    warn "PHP-FPM pool directory not found at ${fpm_pool_dir}; skipping guardrails."
+    return
+  fi
+
+  local guardrails_conf="${fpm_pool_dir}/zz-nexus-guardrails.conf"
+  local guardrails_content="[www]
+slowlog = ${slowlog_path}
+request_slowlog_timeout = 5s
+request_slowlog_trace_depth = 20
+request_terminate_timeout = 60s
+request_terminate_timeout_track_finished = yes
+"
+
+  if $DRY_RUN; then
+    echo "[dry-run] Write $guardrails_conf"
+  else
+    printf "%s" "$guardrails_content" > "$guardrails_conf"
+  fi
+
+  run "${fpm_binary} -t"
+  run "systemctl enable --now ${fpm_service}"
+  run "systemctl reload ${fpm_service}"
 }
 
 stage_php_web_stack() {
@@ -561,7 +602,7 @@ stage_php_web_stack() {
       run "add-apt-repository ppa:ondrej/php -y"
       run "apt-get update"
     fi
-    pkg_install "php8.4 php8.4-cli php8.4-fpm php8.4-mysql php8.4-xml php8.4-curl php8.4-mbstring php8.4-zip php8.4-bcmath"
+    pkg_install "php8.5 php8.5-cli php8.5-fpm php8.5-mysql php8.5-xml php8.5-curl php8.5-mbstring php8.5-zip php8.5-bcmath"
     pkg_install "php-redis" || true
   else
     pkg_install "php php-cli php-fpm php-mysqlnd php-xml php-mbstring php-json php-gd php-bcmath"
@@ -569,6 +610,7 @@ stage_php_web_stack() {
   fi
 
   detect_php_fpm_socket
+  configure_php_fpm_guardrails
 
   # MySQL (only if INSTALL_DB)
   if $INSTALL_DB; then
@@ -713,11 +755,27 @@ stage_laravel_backend() {
     set_env_kv "REDIS_HOST" "127.0.0.1" "$ENV_FILE"
     set_env_kv "REDIS_PORT" "6379" "$ENV_FILE"
     set_env_kv "REDIS_PASSWORD" "null" "$ENV_FILE"
+    set_env_kv "REDIS_DB" "0" "$ENV_FILE"
+    set_env_kv "REDIS_CACHE_DB" "1" "$ENV_FILE"
+    set_env_kv "REDIS_PULSE_DB" "2" "$ENV_FILE"
+    set_env_kv "PULSE_INGEST_DRIVER" "redis" "$ENV_FILE"
+    set_env_kv "PULSE_REDIS_CONNECTION" "pulse" "$ENV_FILE"
   else
     set_env_kv "CACHE_DRIVER" "file" "$ENV_FILE"
     set_env_kv "QUEUE_CONNECTION" "database" "$ENV_FILE"
     set_env_kv "SESSION_DRIVER" "file" "$ENV_FILE"
+    set_env_kv "PULSE_INGEST_DRIVER" "storage" "$ENV_FILE"
   fi
+
+  set_env_kv "PULSE_SLOW_QUERIES_MAX_QUERY_LENGTH" "2048" "$ENV_FILE"
+  set_env_kv "PULSE_CACHE_INTERACTIONS_SAMPLE_RATE" "0.05" "$ENV_FILE"
+  set_env_kv "PULSE_QUEUES_SAMPLE_RATE" "0.1" "$ENV_FILE"
+  set_env_kv "PULSE_SLOW_JOBS_SAMPLE_RATE" "0.1" "$ENV_FILE"
+  set_env_kv "PULSE_SLOW_OUTGOING_REQUESTS_SAMPLE_RATE" "0.1" "$ENV_FILE"
+  set_env_kv "PULSE_SLOW_QUERIES_SAMPLE_RATE" "0.1" "$ENV_FILE"
+  set_env_kv "PULSE_SLOW_REQUESTS_SAMPLE_RATE" "0.1" "$ENV_FILE"
+  set_env_kv "PULSE_USER_JOBS_SAMPLE_RATE" "0.1" "$ENV_FILE"
+  set_env_kv "PULSE_USER_REQUESTS_SAMPLE_RATE" "0.1" "$ENV_FILE"
 
   set_env_kv "PW_API_KEY" "$PW_API_KEY" "$ENV_FILE"
   set_env_kv "PW_API_MUTATION_KEY" "$PW_API_MUTATION_KEY" "$ENV_FILE"
@@ -895,6 +953,46 @@ stdout_logfile=${APP_PATH}/storage/logs/worker-sync.log
 stopwaitsecs=10
 "
     if $DRY_RUN; then echo "[dry-run] Write $WORKER_SYNC_CONF"; else printf "%s" "$WORKER_SYNC_CONTENT" > "$WORKER_SYNC_CONF"; fi
+
+    local PULSE_CHECK_CONF="/etc/supervisor/conf.d/nexus-pulse-check.conf"
+    local PULSE_CHECK_CONTENT="[program:nexus-pulse-check]
+process_name=%(program_name)s_%(process_num)02d
+directory=${APP_PATH}
+command=/usr/bin/php artisan pulse:check
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+numprocs=1
+user=${WEB_USER}
+redirect_stderr=true
+stdout_logfile=${APP_PATH}/storage/logs/pulse-check.log
+stopwaitsecs=10
+"
+    if $DRY_RUN; then echo "[dry-run] Write $PULSE_CHECK_CONF"; else printf "%s" "$PULSE_CHECK_CONTENT" > "$PULSE_CHECK_CONF"; fi
+
+    local PULSE_WORK_CONF="/etc/supervisor/conf.d/nexus-pulse-work.conf"
+    if [[ "${USE_REDIS,,}" == "true" ]]; then
+      local PULSE_WORK_CONTENT="[program:nexus-pulse-work]
+process_name=%(program_name)s_%(process_num)02d
+directory=${APP_PATH}
+command=/usr/bin/php artisan pulse:work
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+numprocs=1
+user=${WEB_USER}
+redirect_stderr=true
+stdout_logfile=${APP_PATH}/storage/logs/pulse-work.log
+stopwaitsecs=10
+"
+      if $DRY_RUN; then echo "[dry-run] Write $PULSE_WORK_CONF"; else printf "%s" "$PULSE_WORK_CONTENT" > "$PULSE_WORK_CONF"; fi
+    elif $DRY_RUN; then
+      echo "[dry-run] Remove $PULSE_WORK_CONF"
+    else
+      rm -f "$PULSE_WORK_CONF"
+    fi
   fi
 
   if $INSTALL_SUBS; then
@@ -925,6 +1023,10 @@ stopwaitsecs=10
   run "supervisorctl update"
   $INSTALL_APP && run "supervisorctl start nexus-worker:* || true"
   $INSTALL_APP && run "supervisorctl start nexus-worker-sync:* || true"
+  $INSTALL_APP && run "supervisorctl start nexus-pulse-check:* || true"
+  if $INSTALL_APP && [[ "${USE_REDIS,,}" == "true" ]]; then
+    run "supervisorctl start nexus-pulse-work:* || true"
+  fi
   $INSTALL_SUBS && run "supervisorctl start nexus-subs:* || true"
   run "supervisorctl status || true"
 }

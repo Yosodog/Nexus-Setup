@@ -216,7 +216,7 @@ Log file:             /var/log/nexus-install.log
 
 | Problem                              | Possible Cause / Fix                                                                      |
 | ------------------------------------ | ----------------------------------------------------------------------------------------- |
-| **403 Forbidden or PHP downloading** | PHP-FPM not linked; rerun installer or verify `/run/php/php8.4-fpm.sock` in Nginx config. |
+| **403 Forbidden or PHP downloading** | PHP-FPM not linked; rerun installer or verify `/run/php/php8.5-fpm.sock` in Nginx config. |
 | **Certbot failure**                  | Ensure ports 80/443 are open and DNS resolves to this server.                             |
 | **Vite build error (EACCES)**        | Run `chmod +x node_modules/@esbuild/linux-x64/bin/esbuild`.                               |
 | **Supervisor not starting**          | `sudo systemctl restart supervisor` and check `/var/log/supervisor/supervisord.log`.      |
@@ -227,8 +227,8 @@ Log file:             /var/log/nexus-install.log
 Remove all components manually if needed:
 
 ```bash
-sudo systemctl stop nginx mysql php8.4-fpm supervisor
-sudo apt purge -y nginx mysql-server php8.4* supervisor certbot
+sudo systemctl stop nginx mysql php8.5-fpm supervisor
+sudo apt purge -y nginx mysql-server php8.5* supervisor certbot
 sudo rm -rf /var/www/nexus /var/www/Nexus-AMS-Subs
 sudo rm -rf /etc/supervisor/conf.d/nexus-*
 sudo rm -rf /etc/letsencrypt/live/nexus.bkpw.net

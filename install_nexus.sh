@@ -346,6 +346,38 @@ interactive_prompt() {
     REDIS_MAX_MEMORY=""
   fi
 
+  echo ""
+  echo "Subscription delivery transport:"
+  echo "  [1] HTTP API (default)"
+  echo "  [2] Redis Streams"
+  read -r -p "Select [1-2]: " subs_delivery_choice
+
+  SUBS_REDIS_STREAM="nexus:subscriptions:v1"
+  SUBS_REDIS_GROUP="nexus-ams"
+  SUBS_REDIS_BLOCK_MS="5000"
+  SUBS_REDIS_READ_COUNT="10"
+  SUBS_REDIS_CLAIM_IDLE_MS="60000"
+  SUBS_REDIS_MAX_DELIVERIES="5"
+
+  if [[ "$subs_delivery_choice" == "2" ]]; then
+    SUBS_DELIVERY_DRIVER="redis-stream"
+    local default_subs_redis_url=""
+
+    if [[ "${USE_REDIS,,}" == "true" && "$INSTALL_PROFILE" != "web-only" && "$INSTALL_PROFILE" != "subs-only" ]]; then
+      default_subs_redis_url="redis://127.0.0.1:6379/3"
+    fi
+
+    read -r -p "Shared Redis URL [${default_subs_redis_url:-required private/TLS URL}]: " SUBS_REDIS_URL
+    SUBS_REDIS_URL="${SUBS_REDIS_URL:-$default_subs_redis_url}"
+    [[ -n "$SUBS_REDIS_URL" ]] || die "A private redis:// or TLS rediss:// URL is required for Redis Streams delivery."
+
+    read -r -p "Redis stream [nexus:subscriptions:v1]: " SUBS_REDIS_STREAM_INPUT
+    SUBS_REDIS_STREAM="${SUBS_REDIS_STREAM_INPUT:-$SUBS_REDIS_STREAM}"
+  else
+    SUBS_DELIVERY_DRIVER="http"
+    SUBS_REDIS_URL=""
+  fi
+
   # Nexus / PW config
   echo ""
   echo "Nexus / PW configuration (you can leave blank and edit later in .env):"
@@ -412,6 +444,8 @@ interactive_prompt() {
   echo "DB user:           $DB_USERNAME"
   echo "Use Redis:         $USE_REDIS"
   echo "Redis maxmemory:   ${REDIS_MAX_MEMORY:-N/A}"
+  echo "Subs delivery:     $SUBS_DELIVERY_DRIVER"
+  echo "Subs stream:       ${SUBS_REDIS_STREAM:-N/A}"
   echo "NEXUS_API_URL:     $NEXUS_API_URL"
   echo "Enable snapshots:  $ENABLE_SNAPSHOTS"
   echo "Create admin user: $CREATE_ADMIN_USER"
@@ -447,6 +481,15 @@ DB_PASSWORD="$DB_PASSWORD"
 
 USE_REDIS="$USE_REDIS"
 REDIS_MAX_MEMORY="$REDIS_MAX_MEMORY"
+
+SUBS_DELIVERY_DRIVER="$SUBS_DELIVERY_DRIVER"
+SUBS_REDIS_URL="$SUBS_REDIS_URL"
+SUBS_REDIS_STREAM="$SUBS_REDIS_STREAM"
+SUBS_REDIS_GROUP="$SUBS_REDIS_GROUP"
+SUBS_REDIS_BLOCK_MS="$SUBS_REDIS_BLOCK_MS"
+SUBS_REDIS_READ_COUNT="$SUBS_REDIS_READ_COUNT"
+SUBS_REDIS_CLAIM_IDLE_MS="$SUBS_REDIS_CLAIM_IDLE_MS"
+SUBS_REDIS_MAX_DELIVERIES="$SUBS_REDIS_MAX_DELIVERIES"
 
 NEXUS_API_URL="$NEXUS_API_URL"
 NEXUS_API_TOKEN="$NEXUS_API_TOKEN"
@@ -493,6 +536,30 @@ fi
 : "${SWAP_SIZE_GB:=4}"
 : "${CERTBOT_EMAIL:=yourname@example.com}"
 : "${NODE_BUILD_MAX_OLD_SPACE:=2048}"
+: "${SUBS_DELIVERY_DRIVER:=http}"
+: "${SUBS_REDIS_URL:=}"
+: "${SUBS_REDIS_STREAM:=nexus:subscriptions:v1}"
+: "${SUBS_REDIS_GROUP:=nexus-ams}"
+: "${SUBS_REDIS_BLOCK_MS:=5000}"
+: "${SUBS_REDIS_READ_COUNT:=10}"
+: "${SUBS_REDIS_CLAIM_IDLE_MS:=60000}"
+: "${SUBS_REDIS_MAX_DELIVERIES:=5}"
+
+if [[ "$SUBS_DELIVERY_DRIVER" != "http" && "$SUBS_DELIVERY_DRIVER" != "redis-stream" ]]; then
+  die "SUBS_DELIVERY_DRIVER must be http or redis-stream."
+fi
+
+if [[ "$SUBS_DELIVERY_DRIVER" == "redis-stream" && -z "$SUBS_REDIS_URL" ]]; then
+  if [[ "${USE_REDIS,,}" == "true" && "${INSTALL_PROFILE:-full}" != "web-only" && "${INSTALL_PROFILE:-full}" != "subs-only" ]]; then
+    SUBS_REDIS_URL="redis://127.0.0.1:6379/3"
+  else
+    die "SUBS_REDIS_URL is required for Redis Streams delivery on split-host or external Redis installations."
+  fi
+fi
+
+if [[ "$SUBS_DELIVERY_DRIVER" == "redis-stream" && ! "$SUBS_REDIS_URL" =~ ^rediss?:// ]]; then
+  die "SUBS_REDIS_URL must use a redis:// or rediss:// URL."
+fi
 
 set_profile_flags "${INSTALL_PROFILE:-full}"
 
@@ -781,6 +848,14 @@ stage_laravel_backend() {
   set_env_kv "PW_API_MUTATION_KEY" "$PW_API_MUTATION_KEY" "$ENV_FILE"
   set_env_kv "NEXUS_API_TOKEN" "$NEXUS_API_TOKEN" "$ENV_FILE"
   set_env_kv "PW_ALLIANCE_ID" "$PW_ALLIANCE_ID" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_URL" "$SUBS_REDIS_URL" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_CONNECTION" "subscriptions" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_STREAM" "$SUBS_REDIS_STREAM" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_GROUP" "$SUBS_REDIS_GROUP" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_BLOCK_MS" "$SUBS_REDIS_BLOCK_MS" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_READ_COUNT" "$SUBS_REDIS_READ_COUNT" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_CLAIM_IDLE_MS" "$SUBS_REDIS_CLAIM_IDLE_MS" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_MAX_DELIVERIES" "$SUBS_REDIS_MAX_DELIVERIES" "$ENV_FILE"
 
   run "chmod 600 $APP_PATH/.env"
 
@@ -823,6 +898,9 @@ stage_subs_install() {
   set_env_kv "NEXUS_API_URL" "$NEXUS_API_URL" "$ENV_FILE"
   set_env_kv "NEXUS_API_TOKEN" "$NEXUS_API_TOKEN" "$ENV_FILE"
   set_env_kv "ENABLE_SNAPSHOTS" "$ENABLE_SNAPSHOTS" "$ENV_FILE"
+  set_env_kv "DELIVERY_DRIVER" "$SUBS_DELIVERY_DRIVER" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_URL" "$SUBS_REDIS_URL" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_STREAM" "$SUBS_REDIS_STREAM" "$ENV_FILE"
 
   run "cd $SUBS_PATH && npm ci"
   run "chown -R $WEB_USER:$WEB_USER $SUBS_PATH"
@@ -909,6 +987,29 @@ server {
 }
 
 
+configure_subscription_dead_letter_rotation() {
+  local LOGROTATE_CONF="/etc/logrotate.d/nexus-subscriptions"
+  local LOGROTATE_CONTENT="${SUBS_PATH}/data/dead-letter-events.jsonl ${SUBS_PATH}/src/data/dead-letter-events.jsonl ${APP_PATH}/storage/logs/subscription-stream-dead-letters.jsonl {
+    weekly
+    size 100M
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su ${WEB_USER} ${WEB_USER}
+}
+"
+
+  if $DRY_RUN; then
+    echo "[dry-run] Write $LOGROTATE_CONF"
+  else
+    printf "%s" "$LOGROTATE_CONTENT" > "$LOGROTATE_CONF"
+    chmod 644 "$LOGROTATE_CONF"
+  fi
+}
+
 stage_supervisor() {
   if ! $CONFIGURE_SUPERVISOR; then
     log "Stage 11: Supervisor skipped (CONFIGURE_SUPERVISOR=false)"
@@ -993,6 +1094,30 @@ stopwaitsecs=10
     else
       rm -f "$PULSE_WORK_CONF"
     fi
+
+    local SUBS_STREAM_CONF="/etc/supervisor/conf.d/nexus-subs-stream.conf"
+    if [[ "$SUBS_DELIVERY_DRIVER" == "redis-stream" ]]; then
+      local SUBS_STREAM_CONTENT="[program:nexus-subs-stream]
+process_name=%(program_name)s
+directory=${APP_PATH}
+command=/usr/bin/php artisan subs:consume-stream
+autostart=true
+autorestart=true
+startsecs=1
+stopasgroup=true
+killasgroup=true
+numprocs=1
+user=${WEB_USER}
+redirect_stderr=true
+stdout_logfile=${APP_PATH}/storage/logs/subscription-stream.log
+stopwaitsecs=15
+"
+      if $DRY_RUN; then echo "[dry-run] Write $SUBS_STREAM_CONF"; else printf "%s" "$SUBS_STREAM_CONTENT" > "$SUBS_STREAM_CONF"; fi
+    elif $DRY_RUN; then
+      echo "[dry-run] Remove $SUBS_STREAM_CONF"
+    else
+      rm -f "$SUBS_STREAM_CONF"
+    fi
   fi
 
   if $INSTALL_SUBS; then
@@ -1027,8 +1152,13 @@ stopwaitsecs=10
   if $INSTALL_APP && [[ "${USE_REDIS,,}" == "true" ]]; then
     run "supervisorctl start nexus-pulse-work:* || true"
   fi
+  if $INSTALL_APP && [[ "$SUBS_DELIVERY_DRIVER" == "redis-stream" ]]; then
+    run "supervisorctl start nexus-subs-stream || true"
+  fi
   $INSTALL_SUBS && run "supervisorctl start nexus-subs:* || true"
   run "supervisorctl status || true"
+
+  configure_subscription_dead_letter_rotation
 }
 
 stage_cron() {
@@ -1123,6 +1253,15 @@ stage_redis_install_and_config() {
   else
     warn "Could not find a Redis systemd unit (redis-server/redis). Please enable Redis manually if needed."
   fi
+
+  if [[ "$SUBS_DELIVERY_DRIVER" == "redis-stream" && "$DRY_RUN" == "false" ]]; then
+    local redis_version
+    redis_version="$(redis-server --version | sed -n 's/.*v=\([0-9][0-9.]*\).*/\1/p')"
+
+    if [[ -z "$redis_version" || "$(printf '6.2\n%s\n' "$redis_version" | sort -V | head -n 1)" != "6.2" ]]; then
+      die "Redis Streams delivery requires Redis 6.2 or newer; detected ${redis_version:-unknown}."
+    fi
+  fi
 }
 
 
@@ -1169,6 +1308,8 @@ echo "Database:            ${DB_DATABASE:-N/A}"
 echo "DB user:             ${DB_USERNAME:-N/A}"
 echo "Redis enabled:       ${USE_REDIS:-false}"
 echo "Redis maxmemory:     ${REDIS_MAX_MEMORY:-N/A}"
+echo "Subs delivery:       ${SUBS_DELIVERY_DRIVER:-http}"
+echo "Subs stream:         ${SUBS_REDIS_STREAM:-N/A}"
 echo "Swap enabled:        ${ENABLE_SWAP:-true}"
 echo "Swap size (GB):      ${SWAP_SIZE_GB:-4}"
 echo "Certbot email:       ${CERTBOT_EMAIL:-N/A}"

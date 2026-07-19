@@ -140,6 +140,14 @@ PW_ALLIANCE_ID="877" # Your primary alliance ID
 PW_API_TOKEN="your_pw_api_key_here" # This could be different than above, so that's why it's here
 NEXUS_API_URL="https://example.com/api/v1/subs" # No ending /, use your domain to start it
 ENABLE_SNAPSHOTS="false" # Should leave to false until we can get snapshots to work properly
+SUBS_DELIVERY_DRIVER="http" # http or redis-stream
+SUBS_REDIS_URL="" # For a local full install use redis://127.0.0.1:6379/3
+SUBS_REDIS_STREAM="nexus:subscriptions:v1"
+SUBS_REDIS_GROUP="nexus-ams"
+SUBS_REDIS_BLOCK_MS="5000"
+SUBS_REDIS_READ_COUNT="10"
+SUBS_REDIS_CLAIM_IDLE_MS="60000"
+SUBS_REDIS_MAX_DELIVERIES="5"
 
 # ========== ADMIN EMAIL FOR CERTBOT ==========
 ADMIN_EMAIL="admin@example.com"
@@ -174,6 +182,7 @@ Cron installed:       yes (www-data schedule:run)
 Supervisor processes:
 nexus-worker:RUNNING
 nexus-subs:RUNNING
+nexus-subs-stream:RUNNING # when SUBS_DELIVERY_DRIVER=redis-stream
 Nginx test:           OK
 Log file:             /var/log/nexus-install.log
 ===================================================
@@ -194,7 +203,7 @@ Log file:             /var/log/nexus-install.log
     sudo supervisorctl status
     
     ```
-    
+
 -   Confirm scheduler cron entry:
     
     ```bash
@@ -208,6 +217,37 @@ Log file:             /var/log/nexus-install.log
     less /var/log/nexus-install.log
     
     ```
+
+## Optional Redis Streams Delivery
+
+The subscription service uses HTTP by default. Set
+`SUBS_DELIVERY_DRIVER=redis-stream` to publish Politics & War deliveries to a
+Redis Stream and run the Nexus `subs:consume-stream` worker.
+
+For a full installation with `USE_REDIS=true`, the default stream endpoint is
+`redis://127.0.0.1:6379/3`. Redis DB 0 remains available for queues, DB 1 for
+cache, and DB 2 for Pulse. Successful stream messages are acknowledged and
+deleted, so DB 3 is transport rather than long-term event storage.
+
+For split `web-only` and `subs-only` installations, configure both hosts with
+the same private `redis://` or TLS `rediss://` URL. The installer deliberately
+does not change Redis bind addresses or open port 6379. Provision private
+networking, TLS, authentication, ACLs, and firewall rules outside this script.
+
+The HTTP URL and token remain configured as a manual backup. To roll back:
+
+1. Stop `nexus-subs` so no new stream messages are published.
+2. Confirm the stream and pending list are drained or accounted for.
+3. Set `DELIVERY_DRIVER=http` in the Subs `.env`.
+4. Restart `nexus-subs` and confirm HTTP delivery logs resume.
+
+Do not run HTTP and Redis publishing simultaneously. Automatic fallback is not
+enabled because an ambiguous Redis timeout could otherwise deliver the same
+event through both transports.
+
+Redis Streams delivery requires Redis 6.2 or newer. Local Redis installations
+retain AOF persistence and the `noeviction` memory policy. The installer also
+configures log rotation for producer and consumer dead-letter files.
     
 
 ----------

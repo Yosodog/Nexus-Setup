@@ -1,0 +1,22 @@
+name: Installer contract
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Verify Bash syntax
+        run: bash -n install_nexus.sh installer_helpers.sh tests/install_contract_test.sh
+
+      - name: Verify standalone installer contract
+        run: bash tests/install_contract_test.sh

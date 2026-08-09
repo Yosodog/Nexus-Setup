@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
 # Nexus AMS installer (multi-distro)
-# Version: 2.1.0
+# Version: 2.2.0
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=installer_helpers.sh
+source "${SCRIPT_DIR}/installer_helpers.sh"
+
+readonly INSTALLER_VERSION="2.2.0"
+readonly INSTALLER_PHP_VERSION="8.3"
+readonly INSTALLER_NODE_MAJOR="22"
+
 export DEBIAN_FRONTEND=noninteractive
 export COMPOSER_ALLOW_SUPERUSER=1
-export DEBIAN_FRONTEND=noninteractive
 
 # ---------------------------------------------------------------------------
 # CLI FLAGS
 # ---------------------------------------------------------------------------
 DRY_RUN=false
 FORCE_NON_INTERACTIVE=false
+CHECK_CONFIG=false
 
-for arg in "${@:-}"; do
+for arg in "$@"; do
   case "$arg" in
     --dry-run)         DRY_RUN=true ;;
     --non-interactive) FORCE_NON_INTERACTIVE=true ;;
+    --check-config)    CHECK_CONFIG=true; FORCE_NON_INTERACTIVE=true ;;
+    *)                 printf 'Unknown option: %s\n' "$arg" >&2; exit 64 ;;
   esac
 done
 
@@ -25,8 +35,10 @@ done
 # LOGGING
 # ---------------------------------------------------------------------------
 LOG_FILE="/var/log/nexus-install.log"
-mkdir -p "$(dirname "$LOG_FILE")"
-exec > >(tee -a "$LOG_FILE") 2>&1
+if ! $CHECK_CONFIG; then
+  mkdir -p "$(dirname "$LOG_FILE")"
+  exec > >(tee -a "$LOG_FILE") 2>&1
+fi
 
 log()  { printf "\n\033[1;32m==> %s\033[0m\n" "$*"; }
 warn() { printf "\n\033[1;33m[!] %s\033[0m\n" "$*"; }
@@ -165,7 +177,7 @@ configure_redis_maxmemory() {
 # ASCII BANNER
 # ---------------------------------------------------------------------------
 print_banner() {
-cat <<'BANNER'
+cat <<BANNER
 ==========================================================================
 
 ███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗     █████╗ ███╗   ███╗███████╗
@@ -175,7 +187,7 @@ cat <<'BANNER'
 ██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║    ██║  ██║██║ ╚═╝ ██║███████║
 ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝
                                                                         
-                        Nexus AMS Installer v2.0.0
+                        Nexus AMS Installer v${INSTALLER_VERSION}
 ==========================================================================
 BANNER
 }
@@ -327,7 +339,8 @@ interactive_prompt() {
   read -r -p "DB username [nexus]: " DB_USERNAME
   DB_USERNAME="${DB_USERNAME:-nexus}"
 
-  read -r -p "DB password [nexus-pass]: " DB_PASSWORD
+  read -r -s -p "DB password [nexus-pass]: " DB_PASSWORD
+  echo ""
   DB_PASSWORD="${DB_PASSWORD:-nexus-pass}"
 
   # Redis choice
@@ -367,7 +380,8 @@ interactive_prompt() {
       default_subs_redis_url="redis://127.0.0.1:6379/3"
     fi
 
-    read -r -p "Shared Redis URL [${default_subs_redis_url:-required private/TLS URL}]: " SUBS_REDIS_URL
+    read -r -s -p "Shared Redis URL [${default_subs_redis_url:-required private/TLS URL}]: " SUBS_REDIS_URL
+    echo ""
     SUBS_REDIS_URL="${SUBS_REDIS_URL:-$default_subs_redis_url}"
     [[ -n "$SUBS_REDIS_URL" ]] || die "A private redis:// or TLS rediss:// URL is required for Redis Streams delivery."
 
@@ -385,9 +399,13 @@ interactive_prompt() {
   read -r -p "NEXUS_API_URL [${default_nexus_api_url}]: " NEXUS_API_URL
   NEXUS_API_URL="${NEXUS_API_URL:-$default_nexus_api_url}"
 
-  read -r -p "NEXUS_API_TOKEN: " NEXUS_API_TOKEN
-  read -r -p "PW_API_KEY: " PW_API_KEY
-  read -r -p "PW_API_MUTATION_KEY: " PW_API_MUTATION_KEY
+  read -r -s -p "NEXUS_API_TOKEN: " NEXUS_API_TOKEN
+  echo ""
+  read -r -s -p "PW_API_KEY: " PW_API_KEY
+  echo ""
+  PW_API_TOKEN="$PW_API_KEY"
+  read -r -s -p "PW_API_MUTATION_KEY: " PW_API_MUTATION_KEY
+  echo ""
   read -r -p "PW_ALLIANCE_ID: " PW_ALLIANCE_ID
 
   read -r -p "Enable snapshots in Subs? [y/N]: " enable_snapshots_ans
@@ -416,7 +434,8 @@ interactive_prompt() {
     read -r -p "Admin email [${default_admin_email}]: " ADMIN_EMAIL
     ADMIN_EMAIL="${ADMIN_EMAIL:-$default_admin_email}"
 
-    read -r -p "Admin password [change-me]: " ADMIN_PASSWORD
+    read -r -s -p "Admin password [change-me]: " ADMIN_PASSWORD
+    echo ""
     ADMIN_PASSWORD="${ADMIN_PASSWORD:-change-me}"
     read -r -p "Admin nation ID (numeric, default 0): " ADMIN_NATION_ID
     ADMIN_NATION_ID="${ADMIN_NATION_ID:-0}"
@@ -466,6 +485,8 @@ interactive_prompt() {
 DOMAIN="$DOMAIN"
 APP_PATH="$APP_PATH"
 SUBS_PATH="$SUBS_PATH"
+NEXUS_RUNTIME="standalone"
+NEXUS_MANAGED="false"
 APP_NAME="$APP_NAME"
 APP_URL="$APP_URL"
 
@@ -494,6 +515,7 @@ SUBS_REDIS_MAX_DELIVERIES="$SUBS_REDIS_MAX_DELIVERIES"
 NEXUS_API_URL="$NEXUS_API_URL"
 NEXUS_API_TOKEN="$NEXUS_API_TOKEN"
 PW_API_KEY="$PW_API_KEY"
+PW_API_TOKEN="$PW_API_TOKEN"
 PW_API_MUTATION_KEY="$PW_API_MUTATION_KEY"
 PW_ALLIANCE_ID="$PW_ALLIANCE_ID"
 ENABLE_SNAPSHOTS="$ENABLE_SNAPSHOTS"
@@ -506,44 +528,53 @@ ADMIN_NATION_ID="$ADMIN_NATION_ID"
 ADMIN_ROLE_ID="$ADMIN_ROLE_ID"
 CERTBOT_EMAIL="$CERTBOT_EMAIL"
 EOF
+    chmod 600 "$ENV_PATH"
   fi
 }
 
 # ---------------------------------------------------------------------------
 # ENV LOADING (interactive default, --non-interactive uses existing env)
 # ---------------------------------------------------------------------------
-require_root
-detect_os
-detect_web_user
+if ! $CHECK_CONFIG; then
+  require_root
+  detect_os
+  detect_web_user
+fi
 
-log "Nexus AMS Installer v2.1.0"
+log "Nexus AMS Installer v${INSTALLER_VERSION}"
 $DRY_RUN && warn "Dry-run mode enabled. Commands will be printed but not executed."
 
 if $FORCE_NON_INTERACTIVE; then
   [[ -f "$ENV_PATH" ]] || die "install.env not found. It is required for --non-interactive mode."
+  if ! $CHECK_CONFIG && ! $DRY_RUN; then
+    chmod 600 "$ENV_PATH"
+  fi
   log "Non-interactive mode: using existing install.env"
   # shellcheck disable=SC1090
   source "$ENV_PATH"
 else
   # Interactive is default
   interactive_prompt
-  # shellcheck disable=SC1090
-  source "$ENV_PATH"
+  if ! $DRY_RUN; then
+    # shellcheck disable=SC1090
+    source "$ENV_PATH"
+  fi
 fi
 
-# Defaults for new fields if missing (for non-interactive legacy envs)
-: "${ENABLE_SWAP:=true}"
-: "${SWAP_SIZE_GB:=4}"
-: "${CERTBOT_EMAIL:=yourname@example.com}"
-: "${NODE_BUILD_MAX_OLD_SPACE:=2048}"
-: "${SUBS_DELIVERY_DRIVER:=http}"
-: "${SUBS_REDIS_URL:=}"
-: "${SUBS_REDIS_STREAM:=nexus:subscriptions:v1}"
-: "${SUBS_REDIS_GROUP:=nexus-ams}"
-: "${SUBS_REDIS_BLOCK_MS:=5000}"
-: "${SUBS_REDIS_READ_COUNT:=10}"
-: "${SUBS_REDIS_CLAIM_IDLE_MS:=60000}"
-: "${SUBS_REDIS_MAX_DELIVERIES:=5}"
+# Preserve legacy noninteractive install.env files while defining every
+# optional value before set -u can encounter it.
+apply_installer_defaults
+
+validate_standalone_runtime "$NEXUS_RUNTIME" "$NEXUS_MANAGED" \
+  || die "Hosted and world-writer runtimes require the Nexus Cloud deployment path."
+
+validate_no_cloud_configuration \
+  "${NEXUS_TENANT_ID:-}" \
+  "${NEXUS_CONTROL_CALLBACK_URL:-}" \
+  "${NEXUS_CONTROL_CALLBACK_KEY_FILE:-}" \
+  "${NEXUS_BOOTSTRAP_INTROSPECTION_URL:-}" \
+  "${NEXUS_TENANT_EVENTS_REDIS_URL:-}" \
+  || die "Remove hosted-only values before using the standalone installer."
 
 if [[ "$SUBS_DELIVERY_DRIVER" != "http" && "$SUBS_DELIVERY_DRIVER" != "redis-stream" ]]; then
   die "SUBS_DELIVERY_DRIVER must be http or redis-stream."
@@ -563,9 +594,36 @@ fi
 
 set_profile_flags "${INSTALL_PROFILE:-full}"
 
+if $INSTALL_APP && [[ -f "$APP_PATH/.env" ]]; then
+  existing_runtime="$(read_env_value "NEXUS_RUNTIME" "$APP_PATH/.env")"
+  existing_managed="$(read_env_value "NEXUS_MANAGED" "$APP_PATH/.env")"
+  existing_tenant_id="$(read_env_value "NEXUS_TENANT_ID" "$APP_PATH/.env")"
+  existing_callback_url="$(read_env_value "NEXUS_CONTROL_CALLBACK_URL" "$APP_PATH/.env")"
+
+  validate_standalone_runtime "${existing_runtime:-standalone}" "${existing_managed:-false}" \
+    || die "Refusing to convert an existing managed AMS installation to standalone."
+  validate_no_cloud_configuration "$existing_tenant_id" "$existing_callback_url" \
+    || die "Refusing to reuse an AMS environment with hosted-only Cloud configuration."
+fi
+
+if $CHECK_CONFIG; then
+  log "Configuration is valid for a standalone Nexus AMS installation."
+  exit 0
+fi
+
+if [[ -f "$ENV_PATH" ]] && ! $DRY_RUN; then
+  chmod 600 "$ENV_PATH"
+fi
+
 PHP_FPM_SOCK=""
 NGINX_SITE=""
 NGINX_ENABLED=""
+
+if $IS_DEBIAN; then
+  PHP_BINARY="/usr/bin/php${INSTALLER_PHP_VERSION}"
+else
+  PHP_BINARY="/usr/bin/php"
+fi
 
 # ---------------------------------------------------------------------------
 # PORT CHECKS
@@ -611,9 +669,7 @@ stage_swap() {
 
 detect_php_fpm_socket() {
   if $IS_DEBIAN; then
-    local ver
-    ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.5")"
-    PHP_FPM_SOCK="/run/php/php${ver}-fpm.sock"
+    PHP_FPM_SOCK="/run/php/php${INSTALLER_PHP_VERSION}-fpm.sock"
   else
     PHP_FPM_SOCK="/run/php-fpm/www.sock"
   fi
@@ -623,7 +679,7 @@ configure_php_fpm_guardrails() {
   local fpm_binary fpm_pool_dir fpm_service php_version slowlog_path
 
   if $IS_DEBIAN; then
-    php_version="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+    php_version="$INSTALLER_PHP_VERSION"
     fpm_binary="php-fpm${php_version}"
     fpm_pool_dir="/etc/php/${php_version}/fpm/pool.d"
     fpm_service="php${php_version}-fpm"
@@ -660,24 +716,54 @@ request_terminate_timeout_track_finished = yes
   run "systemctl reload ${fpm_service}"
 }
 
+verify_php_runtime() {
+  if $DRY_RUN; then
+    echo "[dry-run] Verify PHP ${INSTALLER_PHP_VERSION} and required extensions"
+    return
+  fi
+
+  [[ -x "$PHP_BINARY" ]] || die "Expected PHP binary not found at ${PHP_BINARY}."
+
+  local actual_version
+  actual_version="$($PHP_BINARY -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+  [[ "$actual_version" == "$INSTALLER_PHP_VERSION" ]] \
+    || die "Nexus Setup requires PHP ${INSTALLER_PHP_VERSION}; detected ${actual_version}."
+
+  "$PHP_BINARY" -r '
+    foreach (["bcmath", "curl", "dom", "gd", "intl", "mbstring", "pdo_mysql", "zip"] as $extension) {
+        if (! extension_loaded($extension)) {
+            fwrite(STDERR, "Missing required PHP extension: {$extension}\n");
+            exit(1);
+        }
+    }
+  ' || die "The installed PHP runtime is missing a required extension."
+}
+
 stage_php_web_stack() {
   log "Stage 3: PHP, MySQL (if enabled), Nginx"
 
-  # PHP
-  if $IS_DEBIAN; then
-    if ! ls /etc/apt/sources.list.d/ 2>/dev/null | grep -q "ondrej-ubuntu-php"; then
-      run "add-apt-repository ppa:ondrej/php -y"
-      run "apt-get update"
+  if $INSTALL_PHP; then
+    # PHP
+    if $IS_DEBIAN; then
+      if ! ls /etc/apt/sources.list.d/ 2>/dev/null | grep -q "ondrej-ubuntu-php"; then
+        run "add-apt-repository ppa:ondrej/php -y"
+        run "apt-get update"
+      fi
+      pkg_install "php${INSTALLER_PHP_VERSION} php${INSTALLER_PHP_VERSION}-cli php${INSTALLER_PHP_VERSION}-fpm php${INSTALLER_PHP_VERSION}-mysql php${INSTALLER_PHP_VERSION}-xml php${INSTALLER_PHP_VERSION}-curl php${INSTALLER_PHP_VERSION}-mbstring php${INSTALLER_PHP_VERSION}-zip php${INSTALLER_PHP_VERSION}-bcmath php${INSTALLER_PHP_VERSION}-gd php${INSTALLER_PHP_VERSION}-intl php${INSTALLER_PHP_VERSION}-opcache"
+      if [[ "${USE_REDIS,,}" == "true" || "$SUBS_DELIVERY_DRIVER" == "redis-stream" ]]; then
+        pkg_install "php${INSTALLER_PHP_VERSION}-redis"
+      fi
+    else
+      pkg_install "php php-cli php-fpm php-mysqlnd php-xml php-curl php-mbstring php-json php-gd php-intl php-opcache php-zip php-bcmath"
+      if [[ "${USE_REDIS,,}" == "true" || "$SUBS_DELIVERY_DRIVER" == "redis-stream" ]]; then
+        pkg_install "php-pecl-redis"
+      fi
     fi
-    pkg_install "php8.5 php8.5-cli php8.5-fpm php8.5-mysql php8.5-xml php8.5-curl php8.5-mbstring php8.5-zip php8.5-bcmath"
-    pkg_install "php-redis" || true
-  else
-    pkg_install "php php-cli php-fpm php-mysqlnd php-xml php-mbstring php-json php-gd php-bcmath"
-    pkg_install "php-pecl-redis" || true
-  fi
 
-  detect_php_fpm_socket
-  configure_php_fpm_guardrails
+    verify_php_runtime
+    detect_php_fpm_socket
+    configure_php_fpm_guardrails
+  fi
 
   # MySQL (only if INSTALL_DB)
   if $INSTALL_DB; then
@@ -731,18 +817,37 @@ stage_node_composer() {
     return
   fi
 
-  log "Stage 5: Node LTS & Composer"
+  log "Stage 5: Node ${INSTALLER_NODE_MAJOR} LTS and Composer when AMS is installed"
 
   if $IS_DEBIAN; then
-    run "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -"
+    run "curl -fsSL https://deb.nodesource.com/setup_${INSTALLER_NODE_MAJOR}.x | bash -"
     pkg_install "nodejs"
   else
-    pkg_install "nodejs npm" || true
+    run "curl -fsSL https://rpm.nodesource.com/setup_${INSTALLER_NODE_MAJOR}.x | bash -"
+    pkg_install "nodejs"
   fi
 
-  run "php -r \"copy('https://getcomposer.org/installer','composer-setup.php');\""
-  run "php composer-setup.php --install-dir=/usr/local/bin --filename=composer"
-  run "php -r \"unlink('composer-setup.php');\""
+  if $DRY_RUN; then
+    echo "[dry-run] Verify Node ${INSTALLER_NODE_MAJOR}"
+  else
+    local node_major
+    node_major="$(node -p 'process.versions.node.split(".")[0]')"
+    [[ "$node_major" == "$INSTALLER_NODE_MAJOR" ]] \
+      || die "Nexus Setup requires Node ${INSTALLER_NODE_MAJOR}; detected major ${node_major}."
+  fi
+
+  if $INSTALL_APP; then
+    run "$PHP_BINARY -r \"copy('https://getcomposer.org/installer','composer-setup.php');\""
+    run "$PHP_BINARY composer-setup.php --install-dir=/usr/local/bin --filename=composer"
+    run "$PHP_BINARY -r \"unlink('composer-setup.php');\""
+
+    if $DRY_RUN; then
+      echo "[dry-run] Verify Composer under PHP ${INSTALLER_PHP_VERSION}"
+    else
+      "$PHP_BINARY" /usr/local/bin/composer --version >/dev/null \
+        || die "Composer could not run under PHP ${INSTALLER_PHP_VERSION}."
+    fi
+  fi
 }
 
 stage_database_setup() {
@@ -773,22 +878,6 @@ SQL
   fi
 }
 
-set_env_kv() {
-  local key="$1" val="$2"
-  local env_file="$3"
-
-  if $DRY_RUN; then
-    echo "[dry-run] set $key=$val in $env_file"
-    return
-  fi
-
-  if grep -q "^$key=" "$env_file" 2>/dev/null; then
-    sed -i "s|^$key=.*|$key=${val//|/\\|}|" "$env_file"
-  else
-    echo "$key=$val" >> "$env_file"
-  fi
-}
-
 stage_laravel_backend() {
   if ! $INSTALL_APP; then
     log "Stage 7: Laravel backend skipped (INSTALL_APP=false)"
@@ -799,19 +888,23 @@ stage_laravel_backend() {
 
   run "cd $APP_PATH"
   if [[ ! -f "$APP_PATH/.env" ]]; then run "cp .env.example .env"; fi
+  run "chmod 600 $APP_PATH/.env"
 
   local ENV_FILE="$APP_PATH/.env"
   set_env_kv "APP_NAME" "\"$APP_NAME\"" "$ENV_FILE"
   set_env_kv "APP_ENV" "production" "$ENV_FILE"
   set_env_kv "APP_DEBUG" "false" "$ENV_FILE"
   set_env_kv "APP_URL" "$APP_URL" "$ENV_FILE"
+  set_env_kv "NEXUS_RUNTIME" "standalone" "$ENV_FILE"
+  set_env_kv "NEXUS_MANAGED" "false" "$ENV_FILE"
+  set_env_kv "NEXUS_TENANT_ID" "" "$ENV_FILE"
 
   set_env_kv "DB_CONNECTION" "mysql" "$ENV_FILE"
   set_env_kv "DB_HOST" "$DB_HOST" "$ENV_FILE"
   set_env_kv "DB_PORT" "3306" "$ENV_FILE"
   set_env_kv "DB_DATABASE" "$DB_DATABASE" "$ENV_FILE"
   set_env_kv "DB_USERNAME" "$DB_USERNAME" "$ENV_FILE"
-  set_env_kv "DB_PASSWORD" "$DB_PASSWORD" "$ENV_FILE"
+  set_env_kv "DB_PASSWORD" "$DB_PASSWORD" "$ENV_FILE" "secret"
 
   # Redis or DB/file
   if [[ "${USE_REDIS,,}" == "true" ]]; then
@@ -821,7 +914,7 @@ stage_laravel_backend() {
     set_env_kv "REDIS_CLIENT" "phpredis" "$ENV_FILE"
     set_env_kv "REDIS_HOST" "127.0.0.1" "$ENV_FILE"
     set_env_kv "REDIS_PORT" "6379" "$ENV_FILE"
-    set_env_kv "REDIS_PASSWORD" "null" "$ENV_FILE"
+    set_env_kv "REDIS_PASSWORD" "null" "$ENV_FILE" "secret"
     set_env_kv "REDIS_DB" "0" "$ENV_FILE"
     set_env_kv "REDIS_CACHE_DB" "1" "$ENV_FILE"
     set_env_kv "REDIS_PULSE_DB" "2" "$ENV_FILE"
@@ -844,11 +937,11 @@ stage_laravel_backend() {
   set_env_kv "PULSE_USER_JOBS_SAMPLE_RATE" "0.1" "$ENV_FILE"
   set_env_kv "PULSE_USER_REQUESTS_SAMPLE_RATE" "0.1" "$ENV_FILE"
 
-  set_env_kv "PW_API_KEY" "$PW_API_KEY" "$ENV_FILE"
-  set_env_kv "PW_API_MUTATION_KEY" "$PW_API_MUTATION_KEY" "$ENV_FILE"
-  set_env_kv "NEXUS_API_TOKEN" "$NEXUS_API_TOKEN" "$ENV_FILE"
+  set_env_kv "PW_API_KEY" "$PW_API_KEY" "$ENV_FILE" "secret"
+  set_env_kv "PW_API_MUTATION_KEY" "$PW_API_MUTATION_KEY" "$ENV_FILE" "secret"
+  set_env_kv "NEXUS_API_TOKEN" "$NEXUS_API_TOKEN" "$ENV_FILE" "secret"
   set_env_kv "PW_ALLIANCE_ID" "$PW_ALLIANCE_ID" "$ENV_FILE"
-  set_env_kv "SUBS_REDIS_URL" "$SUBS_REDIS_URL" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_URL" "$SUBS_REDIS_URL" "$ENV_FILE" "secret"
   set_env_kv "SUBS_REDIS_CONNECTION" "subscriptions" "$ENV_FILE"
   set_env_kv "SUBS_REDIS_STREAM" "$SUBS_REDIS_STREAM" "$ENV_FILE"
   set_env_kv "SUBS_REDIS_GROUP" "$SUBS_REDIS_GROUP" "$ENV_FILE"
@@ -857,12 +950,11 @@ stage_laravel_backend() {
   set_env_kv "SUBS_REDIS_CLAIM_IDLE_MS" "$SUBS_REDIS_CLAIM_IDLE_MS" "$ENV_FILE"
   set_env_kv "SUBS_REDIS_MAX_DELIVERIES" "$SUBS_REDIS_MAX_DELIVERIES" "$ENV_FILE"
 
-  run "chmod 600 $APP_PATH/.env"
-
-  run "cd $APP_PATH && composer install --no-dev --optimize-autoloader --no-interaction"
-  run "cd $APP_PATH && php artisan key:generate --force"
-  run "cd $APP_PATH && php artisan migrate --force"
-  run "cd $APP_PATH && php artisan db:seed --force"
+  run "cd $APP_PATH && $PHP_BINARY /usr/local/bin/composer install --no-dev --optimize-autoloader --no-interaction"
+  run "cd $APP_PATH && $PHP_BINARY /usr/local/bin/composer check-platform-reqs --no-dev"
+  run "cd $APP_PATH && $PHP_BINARY artisan key:generate --force"
+  run "cd $APP_PATH && $PHP_BINARY artisan migrate --force"
+  run "cd $APP_PATH && $PHP_BINARY artisan db:seed --force"
 }
 
 stage_frontend_build() {
@@ -892,14 +984,15 @@ stage_subs_install() {
   log "Stage 9: Configure Subs .env & install"
   run "cd $SUBS_PATH"
   if [[ ! -f "$SUBS_PATH/.env" ]]; then run "cp .env.example .env"; fi
+  run "chmod 600 $SUBS_PATH/.env"
 
   local ENV_FILE="$SUBS_PATH/.env"
-  set_env_kv "PW_API_TOKEN" "$PW_API_KEY" "$ENV_FILE"
+  set_env_kv "PW_API_TOKEN" "$PW_API_TOKEN" "$ENV_FILE" "secret"
   set_env_kv "NEXUS_API_URL" "$NEXUS_API_URL" "$ENV_FILE"
-  set_env_kv "NEXUS_API_TOKEN" "$NEXUS_API_TOKEN" "$ENV_FILE"
+  set_env_kv "NEXUS_API_TOKEN" "$NEXUS_API_TOKEN" "$ENV_FILE" "secret"
   set_env_kv "ENABLE_SNAPSHOTS" "$ENABLE_SNAPSHOTS" "$ENV_FILE"
   set_env_kv "DELIVERY_DRIVER" "$SUBS_DELIVERY_DRIVER" "$ENV_FILE"
-  set_env_kv "SUBS_REDIS_URL" "$SUBS_REDIS_URL" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_URL" "$SUBS_REDIS_URL" "$ENV_FILE" "secret"
   set_env_kv "SUBS_REDIS_STREAM" "$SUBS_REDIS_STREAM" "$ENV_FILE"
 
   run "cd $SUBS_PATH && npm ci"
@@ -1025,7 +1118,7 @@ stage_supervisor() {
     local WORKER_CONTENT="[program:nexus-worker]
 process_name=%(program_name)s_%(process_num)02d
 directory=${APP_PATH}
-command=/usr/bin/php artisan queue:work --queue=default --sleep=3 --tries=3 --max-time=3600
+command=${PHP_BINARY} artisan queue:work --queue=default --sleep=3 --tries=3 --max-time=3600
 autostart=true
 autorestart=true
 stopasgroup=true
@@ -1034,7 +1127,7 @@ numprocs=2
 user=${WEB_USER}
 redirect_stderr=true
 stdout_logfile=${APP_PATH}/storage/logs/worker.log
-stopwaitsecs=10
+stopwaitsecs=960
 "
     if $DRY_RUN; then echo "[dry-run] Write $WORKER_CONF"; else printf "%s" "$WORKER_CONTENT" > "$WORKER_CONF"; fi
 
@@ -1042,7 +1135,7 @@ stopwaitsecs=10
     local WORKER_SYNC_CONTENT="[program:nexus-worker-sync]
 process_name=%(program_name)s_%(process_num)02d
 directory=${APP_PATH}
-command=/usr/bin/php artisan queue:work --queue=sync --sleep=3 --tries=3 --max-time=3600
+command=${PHP_BINARY} artisan queue:work --queue=sync --sleep=3 --tries=3 --max-time=3600
 autostart=true
 autorestart=true
 stopasgroup=true
@@ -1051,7 +1144,7 @@ numprocs=1
 user=${WEB_USER}
 redirect_stderr=true
 stdout_logfile=${APP_PATH}/storage/logs/worker-sync.log
-stopwaitsecs=10
+stopwaitsecs=960
 "
     if $DRY_RUN; then echo "[dry-run] Write $WORKER_SYNC_CONF"; else printf "%s" "$WORKER_SYNC_CONTENT" > "$WORKER_SYNC_CONF"; fi
 
@@ -1059,7 +1152,7 @@ stopwaitsecs=10
     local PULSE_CHECK_CONTENT="[program:nexus-pulse-check]
 process_name=%(program_name)s_%(process_num)02d
 directory=${APP_PATH}
-command=/usr/bin/php artisan pulse:check
+command=${PHP_BINARY} artisan pulse:check
 autostart=true
 autorestart=true
 stopasgroup=true
@@ -1068,7 +1161,7 @@ numprocs=1
 user=${WEB_USER}
 redirect_stderr=true
 stdout_logfile=${APP_PATH}/storage/logs/pulse-check.log
-stopwaitsecs=10
+stopwaitsecs=60
 "
     if $DRY_RUN; then echo "[dry-run] Write $PULSE_CHECK_CONF"; else printf "%s" "$PULSE_CHECK_CONTENT" > "$PULSE_CHECK_CONF"; fi
 
@@ -1077,7 +1170,7 @@ stopwaitsecs=10
       local PULSE_WORK_CONTENT="[program:nexus-pulse-work]
 process_name=%(program_name)s_%(process_num)02d
 directory=${APP_PATH}
-command=/usr/bin/php artisan pulse:work
+command=${PHP_BINARY} artisan pulse:work
 autostart=true
 autorestart=true
 stopasgroup=true
@@ -1086,7 +1179,7 @@ numprocs=1
 user=${WEB_USER}
 redirect_stderr=true
 stdout_logfile=${APP_PATH}/storage/logs/pulse-work.log
-stopwaitsecs=10
+stopwaitsecs=60
 "
       if $DRY_RUN; then echo "[dry-run] Write $PULSE_WORK_CONF"; else printf "%s" "$PULSE_WORK_CONTENT" > "$PULSE_WORK_CONF"; fi
     elif $DRY_RUN; then
@@ -1100,7 +1193,7 @@ stopwaitsecs=10
       local SUBS_STREAM_CONTENT="[program:nexus-subs-stream]
 process_name=%(program_name)s
 directory=${APP_PATH}
-command=/usr/bin/php artisan subs:consume-stream
+command=${PHP_BINARY} artisan subs:consume-stream
 autostart=true
 autorestart=true
 startsecs=1
@@ -1110,7 +1203,7 @@ numprocs=1
 user=${WEB_USER}
 redirect_stderr=true
 stdout_logfile=${APP_PATH}/storage/logs/subscription-stream.log
-stopwaitsecs=15
+stopwaitsecs=75
 "
       if $DRY_RUN; then echo "[dry-run] Write $SUBS_STREAM_CONF"; else printf "%s" "$SUBS_STREAM_CONTENT" > "$SUBS_STREAM_CONF"; fi
     elif $DRY_RUN; then
@@ -1121,6 +1214,9 @@ stopwaitsecs=15
   fi
 
   if $INSTALL_SUBS; then
+    run "mkdir -p ${SUBS_PATH}/logs"
+    run "chown -R ${WEB_USER}:${WEB_USER} ${SUBS_PATH}/logs"
+
     local SUBS_CONF="/etc/supervisor/conf.d/nexus-subs.conf"
     local SUBS_CONTENT="[program:nexus-subs]
 directory=${SUBS_PATH}/src
@@ -1131,10 +1227,10 @@ stopasgroup=true
 killasgroup=true
 user=${WEB_USER}
 environment=NODE_ENV=\"production\",PATH=\"/usr/bin\"
-stdout_logfile=${APP_PATH}/storage/logs/subs.log
-stderr_logfile=${APP_PATH}/storage/logs/subs-error.log
+stdout_logfile=${SUBS_PATH}/logs/subs.log
+stderr_logfile=${SUBS_PATH}/logs/subs-error.log
 numprocs=1
-stopwaitsecs=10
+stopwaitsecs=30
 "
     if $DRY_RUN; then echo "[dry-run] Write $SUBS_CONF"; else printf "%s" "$SUBS_CONTENT" > "$SUBS_CONF"; fi
   fi
@@ -1169,7 +1265,7 @@ stage_cron() {
 
   log "Stage 12: Cron scheduler (Laravel schedule:run)"
 
-  local CRON_LINE="* * * * * su -s /bin/bash ${WEB_USER} -c \"/usr/bin/php ${APP_PATH}/artisan schedule:run >> ${APP_PATH}/storage/logs/cron.log 2>&1\""
+  local CRON_LINE="* * * * * su -s /bin/bash ${WEB_USER} -c \"${PHP_BINARY} ${APP_PATH}/artisan schedule:run >> ${APP_PATH}/storage/logs/cron.log 2>&1\""
 
   if ! grep -Fq "$CRON_LINE" /etc/crontab 2>/dev/null; then
     run "bash -c 'echo \"$CRON_LINE\" >> /etc/crontab'"
@@ -1185,13 +1281,13 @@ stage_initial_jobs() {
 
   log "Stage 13: Initial Laravel jobs"
   run "cd $APP_PATH"
-  run "sudo -u ${WEB_USER} /usr/bin/php artisan military:sign-in || true"
-  run "sudo -u ${WEB_USER} /usr/bin/php artisan sync:nations || true"
-  run "sudo -u ${WEB_USER} /usr/bin/php artisan sync:alliances || true"
-  run "sudo -u ${WEB_USER} /usr/bin/php artisan sync:wars || true"
-  run "sudo -u ${WEB_USER} /usr/bin/php artisan sync:treaties || true"
-  run "sudo -u ${WEB_USER} /usr/bin/php artisan taxes:collect || true"
-  run "sudo -u ${WEB_USER} /usr/bin/php artisan trades:update || true"
+  run "sudo -u ${WEB_USER} ${PHP_BINARY} artisan military:sign-in || true"
+  run "sudo -u ${WEB_USER} ${PHP_BINARY} artisan sync:nations || true"
+  run "sudo -u ${WEB_USER} ${PHP_BINARY} artisan sync:alliances || true"
+  run "sudo -u ${WEB_USER} ${PHP_BINARY} artisan sync:wars || true"
+  run "sudo -u ${WEB_USER} ${PHP_BINARY} artisan sync:treaties || true"
+  run "sudo -u ${WEB_USER} ${PHP_BINARY} artisan taxes:collect || true"
+  run "sudo -u ${WEB_USER} ${PHP_BINARY} artisan trades:update || true"
 }
 
 stage_admin_user() {
@@ -1212,7 +1308,7 @@ stage_admin_user() {
   fi
 
   cd "$APP_PATH"
-  HASHED_PASS=$(php -r "echo password_hash('${ADMIN_PASSWORD}', PASSWORD_BCRYPT);")
+  HASHED_PASS=$(ADMIN_PASSWORD_VALUE="$ADMIN_PASSWORD" "$PHP_BINARY" -r 'echo password_hash((string) getenv("ADMIN_PASSWORD_VALUE"), PASSWORD_BCRYPT);')
   mysql -u"${DB_USERNAME}" -p"${DB_PASSWORD}" -h"${DB_HOST}" "${DB_DATABASE}" -e "
       INSERT INTO users (name, email, password, nation_id, is_admin, verified_at, created_at, updated_at)
       VALUES ('${ADMIN_NAME}', '${ADMIN_EMAIL}', '${HASHED_PASS}', ${ADMIN_NATION_ID}, 1, NOW(), NOW(), NOW());
@@ -1273,7 +1369,9 @@ log "Using install profile: ${INSTALL_PROFILE}"
 
 $INSTALL_BASE  && stage_base
 $INSTALL_SWAP  && stage_swap
-$INSTALL_PHP   && stage_php_web_stack
+if $INSTALL_PHP || $INSTALL_DB || $INSTALL_NGINX; then
+  stage_php_web_stack
+fi
 stage_redis_install_and_config
 stage_clone_apps
 stage_node_composer
@@ -1316,6 +1414,10 @@ echo "Certbot email:       ${CERTBOT_EMAIL:-N/A}"
 echo "Cron installed:      $( $CONFIGURE_CRON && $INSTALL_APP && echo yes || echo no )"
 echo "Supervisor processes:"
 supervisorctl status 2>/dev/null || true
-echo "Nginx test:          $(nginx -t >/dev/null 2>&1 && echo OK || echo FAIL)"
+if $CONFIGURE_NGINX && $INSTALL_NGINX; then
+  echo "Nginx test:          $(nginx -t >/dev/null 2>&1 && echo OK || echo FAIL)"
+else
+  echo "Nginx test:          SKIPPED"
+fi
 echo "Log file:            $LOG_FILE (appends each run)"
 echo "==================================================="

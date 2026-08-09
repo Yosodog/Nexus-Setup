@@ -3,13 +3,13 @@
 This repository provides a fully automated installation script for **Nexus AMS**, a Laravel-based Alliance Management System for Politics & War.  
 The installer sets up a complete production environment on Ubuntu, including:
 
--   PHP 8.4 (via Ondřej Surý PPA)
+-   PHP 8.3 (via Ondřej Surý PPA on Ubuntu)
     
 -   MySQL Server
     
 -   Nginx
     
--   Node.js (LTS)
+-   Node.js 22 LTS
     
 -   Composer
     
@@ -28,6 +28,10 @@ The goal is a one-command, unattended deployment of a ready-to-use Nexus AMS ins
 | Requirement | Description |
 |--------------|-------------|
 | Operating System | Ubuntu 22.04 LTS or later |
+| PHP | 8.3 with bcmath, curl, DOM, GD, intl, mbstring, MySQL, Redis when selected, and ZIP extensions |
+| Node.js | 22 LTS |
+| Database | MySQL 8.0 or newer |
+| Redis | Optional; 6.2 or newer is required for Redis Streams delivery |
 | Access | Root or sudo privileges |
 | Ports | 80 and 443 open to the public |
 | Memory | Minimum 2 GB (4 GB+ recommended) |
@@ -40,11 +44,11 @@ The goal is a one-command, unattended deployment of a ready-to-use Nexus AMS ins
     
 2.  Configures a 4 GB swap file (idempotent).
     
-3.  Installs PHP 8.4, MySQL, and Nginx.
+3.  Installs PHP 8.3, MySQL, and Nginx.
     
 4.  Clones both the **Nexus AMS** and **Nexus-AMS-Subs** repositories.
     
-5.  Installs Node LTS and Composer.
+5.  Installs Node 22 LTS and Composer 2.
     
 6.  Creates the MySQL database and user.
     
@@ -71,7 +75,9 @@ All output is logged to `/var/log/nexus-install.log`.
 
 ```
 /install_nexus.sh     # Main installation script
+/installer_helpers.sh # Tested defaults, runtime validation, and safe environment writes
 /install.env          # Configuration file (must be edited before running)
+/tests/install_contract_test.sh # Standalone compatibility checks
 README.md
 LICENSE
 
@@ -94,6 +100,7 @@ chmod +x install_nexus.sh
 Edit the environment file with your deployment values:
 
 ```bash
+chmod 600 install.env
 nano install.env
 
 ```
@@ -101,14 +108,15 @@ nano install.env
 Then run the installer:
 
 ```bash
-sudo ./install_nexus.sh
+./install_nexus.sh --check-config
+sudo ./install_nexus.sh --non-interactive
 
 ```
 
 To preview actions without making changes, use:
 
 ```bash
-sudo ./install_nexus.sh --dry-run
+sudo ./install_nexus.sh --non-interactive --dry-run
 
 ```
 
@@ -121,12 +129,23 @@ Inline comments are supported; lines beginning with `#` are ignored.
 # ========== SYSTEM VARIABLES ==========
 DOMAIN="example.com" # Input your root domain (ex: nexus.bkpw.net)
 APP_PATH="/var/www/nexus"
-SUBS_PATH="/var/www/Nexus-AMS-Subs"
+SUBS_PATH="/var/nexus-subs"
+INSTALL_PROFILE="full" # full, app-web-subs-remote-db, web-only, db-only, or subs-only
+ENABLE_SWAP="true"
+SWAP_SIZE_GB="4"
+NODE_BUILD_MAX_OLD_SPACE="2048"
+NEXUS_RUNTIME="standalone"
+NEXUS_MANAGED="false"
 
 # ========== DATABASE ==========
+DB_HOST="127.0.0.1"
 DB_DATABASE="nexus_ams"
 DB_USERNAME="nexususer"
 DB_PASSWORD="StrongPasswordHere!" # Please change this
+
+# ========== CACHE / QUEUE / SESSION ==========
+USE_REDIS="false"
+REDIS_MAX_MEMORY=""
 
 # ========== LARAVEL ENV VARIABLES ==========
 APP_NAME="Nexus AMS" # Change to what you want your application to be called
@@ -150,17 +169,51 @@ SUBS_REDIS_CLAIM_IDLE_MS="60000"
 SUBS_REDIS_MAX_DELIVERIES="5"
 
 # ========== ADMIN EMAIL FOR CERTBOT ==========
-ADMIN_EMAIL="admin@example.com"
+CERTBOT_EMAIL="admin@example.com"
 
 # ========== NEXUS ADMIN USER CREATION ==========
 CREATE_ADMIN_USER="true"             # set to false to skip
 ADMIN_NAME="Yosodog" # Your username
 ADMIN_EMAIL="yosodog@example.com" # Your email
-ADMIN_PASSWORD="ilovechicken123" # Your password (please change after install)
+ADMIN_PASSWORD="change-me-now" # Your password (please change after install)
 ADMIN_NATION_ID="10472" # Your nation ID
 ADMIN_ROLE_ID="1" # If this is a fresh install, ID 1 will be the default admin role
 
 ```
+
+Legacy noninteractive files may omit the runtime, profile, database-host,
+Redis, and newer stream settings. They default to `standalone`, `full`,
+`127.0.0.1`, disabled local Redis, and HTTP Subs delivery, preserving the
+pre-Cloud install path. `PW_API_TOKEN` defaults to `PW_API_KEY` only when a
+separate Subs key was not configured.
+
+## Standalone Runtime Compatibility
+
+Nexus Setup installs self-hosted Nexus AMS only. It writes
+`NEXUS_RUNTIME=standalone` and `NEXUS_MANAGED=false`, never requests a Nexus
+Cloud account, and never configures Cloud tenant IDs, callbacks, bootstrap
+introspection, Cloud sessions, roles, or memberships. Public synchronization,
+tenant-private schedules and workflows, local backups, Discord integration,
+and HTTP or Redis Subs delivery remain owned by the standalone AMS install.
+
+`hosted-tenant`, `world-writer`, and `NEXUS_MANAGED=true` fail configuration
+validation before packages, databases, files, or provider endpoints are
+changed. The installer also refuses to overwrite an existing AMS `.env` that
+declares a managed runtime. Hosted deployments use the Nexus Cloud deployment
+agent and immutable image path instead.
+
+Before a fresh install or upgrade, run:
+
+```bash
+./install_nexus.sh --check-config
+bash -n install_nexus.sh installer_helpers.sh tests/install_contract_test.sh
+bash tests/install_contract_test.sh
+```
+
+The config check does not require root and does not contact external providers.
+On standalone upgrades, Laravel migrations continue targeting physical local
+world tables; Nexus Setup does not install hosted world views or Cloud
+credentials. Back up the application and database before applying an upgrade.
 
 ----------
 
@@ -174,7 +227,7 @@ Installation finished.
 ====================  SUMMARY  ====================
 Domain:               example.com
 App path:             /var/www/nexus
-Subs path:            /var/www/Nexus-AMS-Subs
+Subs path:            /var/nexus-subs
 Database:             nexus_ams
 DB user:              nexususer
 Certbot email:        admin@example.com
@@ -186,8 +239,6 @@ nexus-subs-stream:RUNNING # when SUBS_DELIVERY_DRIVER=redis-stream
 Nginx test:           OK
 Log file:             /var/log/nexus-install.log
 ===================================================
-
-```
 
 ----------
 
@@ -256,7 +307,7 @@ configures log rotation for producer and consumer dead-letter files.
 
 | Problem                              | Possible Cause / Fix                                                                      |
 | ------------------------------------ | ----------------------------------------------------------------------------------------- |
-| **403 Forbidden or PHP downloading** | PHP-FPM not linked; rerun installer or verify `/run/php/php8.5-fpm.sock` in Nginx config. |
+| **403 Forbidden or PHP downloading** | PHP-FPM not linked; rerun installer or verify `/run/php/php8.3-fpm.sock` in Nginx config. |
 | **Certbot failure**                  | Ensure ports 80/443 are open and DNS resolves to this server.                             |
 | **Vite build error (EACCES)**        | Run `chmod +x node_modules/@esbuild/linux-x64/bin/esbuild`.                               |
 | **Supervisor not starting**          | `sudo systemctl restart supervisor` and check `/var/log/supervisor/supervisord.log`.      |
@@ -267,9 +318,9 @@ configures log rotation for producer and consumer dead-letter files.
 Remove all components manually if needed:
 
 ```bash
-sudo systemctl stop nginx mysql php8.5-fpm supervisor
-sudo apt purge -y nginx mysql-server php8.5* supervisor certbot
-sudo rm -rf /var/www/nexus /var/www/Nexus-AMS-Subs
+sudo systemctl stop nginx mysql php8.3-fpm supervisor
+sudo apt purge -y nginx mysql-server php8.3* supervisor certbot
+sudo rm -rf /var/www/nexus /var/nexus-subs
 sudo rm -rf /etc/supervisor/conf.d/nexus-*
 sudo rm -rf /etc/letsencrypt/live/nexus.bkpw.net
 sudo rm /swapfile

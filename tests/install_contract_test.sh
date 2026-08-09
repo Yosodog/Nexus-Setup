@@ -3,6 +3,9 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_AMS_COMMIT="$(printf 'a%.0s' {1..40})"
+TEST_SUBS_COMMIT="$(printf 'b%.0s' {1..40})"
+TEST_RELEASE_ID='release-contract-test'
 
 # shellcheck source=../installer_helpers.sh
 source "${PROJECT_ROOT}/installer_helpers.sh"
@@ -33,7 +36,10 @@ assert_not_contains() {
   unset CERTBOT_EMAIL NODE_BUILD_MAX_OLD_SPACE PW_API_TOKEN SUBS_DELIVERY_DRIVER
   unset SUBS_REDIS_URL SUBS_REDIS_STREAM SUBS_REDIS_GROUP SUBS_REDIS_BLOCK_MS
   unset SUBS_REDIS_READ_COUNT SUBS_REDIS_CLAIM_IDLE_MS SUBS_REDIS_MAX_DELIVERIES
+  unset SUBS_REDIS_HMAC_SECRET
   unset NEXUS_RUNTIME NEXUS_MANAGED
+  unset NEXUS_AMS_REPOSITORY NEXUS_AMS_COMMIT NEXUS_SUBS_REPOSITORY
+  unset NEXUS_SUBS_COMMIT NEXUS_RELEASE_ID ALLOW_UNPINNED_DEVELOPMENT
 
   ADMIN_EMAIL='legacy-admin@example.test'
   PW_API_KEY='synthetic-pw-key'
@@ -46,8 +52,22 @@ assert_not_contains() {
   [[ "$CERTBOT_EMAIL" == "$ADMIN_EMAIL" ]] || fail 'legacy Certbot email is not preserved'
   [[ "$PW_API_TOKEN" == "$PW_API_KEY" ]] || fail 'Subs key does not default to the AMS key'
   [[ "$SUBS_DELIVERY_DRIVER" == 'http' ]] || fail 'legacy delivery does not default to HTTP'
+  [[ -z "$SUBS_REDIS_HMAC_SECRET" ]] || fail 'legacy HMAC secret is not empty by default'
   [[ "$NEXUS_RUNTIME" == 'standalone' ]] || fail 'legacy runtime does not default to standalone'
   [[ "$NEXUS_MANAGED" == 'false' ]] || fail 'legacy runtime defaults to managed'
+  [[ -z "$NEXUS_AMS_COMMIT" && -z "$NEXUS_SUBS_COMMIT" ]] \
+    || fail 'legacy provenance unexpectedly invented checkout SHAs'
+  [[ -z "$NEXUS_RELEASE_ID" ]] || fail 'legacy provenance unexpectedly invented a release ID'
+  [[ "$ALLOW_UNPINNED_DEVELOPMENT" == 'false' ]] \
+    || fail 'unpinned development mode is enabled by default'
+)
+
+(
+  PW_API_KEY='synthetic-ams-key'
+  PW_API_TOKEN='explicit-subs-key'
+  apply_installer_defaults
+  [[ "$PW_API_TOKEN" == 'explicit-subs-key' ]] \
+    || fail 'explicit Subs API key was overwritten by the AMS key'
 )
 
 validate_standalone_runtime 'standalone' 'false' || fail 'standalone runtime is rejected'
@@ -66,6 +86,43 @@ if validate_no_cloud_configuration '01JTESTTENANT' '' >/dev/null 2>&1; then
   fail 'a Cloud tenant identity is accepted by the standalone installer'
 fi
 
+NEXUS_AMS_COMMIT="$TEST_AMS_COMMIT"
+NEXUS_SUBS_COMMIT="$TEST_SUBS_COMMIT"
+NEXUS_RELEASE_ID="$TEST_RELEASE_ID"
+ALLOW_UNPINNED_DEVELOPMENT='false'
+validate_provenance_configuration 'noninteractive' 'true' 'true' \
+  || fail 'pinned noninteractive provenance is rejected'
+
+NEXUS_SUBS_COMMIT=''
+if validate_provenance_configuration 'noninteractive' 'true' 'true' >/dev/null 2>&1; then
+  fail 'noninteractive install accepted a missing Subs commit'
+fi
+
+NEXUS_AMS_COMMIT=''
+NEXUS_RELEASE_ID=''
+ALLOW_UNPINNED_DEVELOPMENT='true'
+validate_provenance_configuration 'interactive' 'true' 'true' \
+  || fail 'explicit interactive development mode is rejected'
+
+if validate_provenance_configuration 'noninteractive' 'true' 'true' >/dev/null 2>&1; then
+  fail 'noninteractive install accepted the development escape hatch'
+fi
+
+NEXUS_AMS_COMMIT="$TEST_AMS_COMMIT"
+NEXUS_SUBS_COMMIT="$TEST_SUBS_COMMIT"
+NEXUS_RELEASE_ID="$TEST_RELEASE_ID"
+ALLOW_UNPINNED_DEVELOPMENT='false'
+
+generated_secret="$(generate_subs_redis_hmac_secret)"
+[[ "$generated_secret" =~ ^[0-9a-f]{64}$ ]] || fail 'generated secret is not 256-bit lowercase hex'
+subs_redis_hmac_secret_is_valid "$generated_secret" || fail 'generated secret is rejected'
+subs_redis_hmac_secret_is_valid "$(printf 's%.0s' {1..32})" \
+  || fail '32-byte secret is rejected'
+
+if subs_redis_hmac_secret_is_valid "$(printf 's%.0s' {1..31})"; then
+  fail '31-byte secret is accepted'
+fi
+
 temporary_directory="$(mktemp -d)"
 trap 'rm -rf "$temporary_directory"' EXIT
 environment_file="${temporary_directory}/service.env"
@@ -77,6 +134,12 @@ dry_run_output="$(set_env_kv 'NEXUS_API_TOKEN' "$synthetic_secret" "$environment
 assert_contains "$dry_run_output" 'NEXUS_API_TOKEN=<redacted>' 'dry-run credential is not redacted'
 assert_not_contains "$dry_run_output" "$synthetic_secret" 'dry-run output contains a credential'
 [[ ! -s "$environment_file" ]] || fail 'dry-run modified an environment file'
+hmac_dry_run_output="$(set_env_kv 'SUBS_REDIS_HMAC_SECRET' "$generated_secret" "$environment_file" 'secret')"
+assert_contains "$hmac_dry_run_output" 'SUBS_REDIS_HMAC_SECRET=<redacted>' \
+  'dry-run HMAC secret is not redacted'
+assert_not_contains "$hmac_dry_run_output" "$generated_secret" \
+  'dry-run output contains the HMAC secret'
+[[ ! -s "$environment_file" ]] || fail 'dry-run HMAC write modified an environment file'
 
 DRY_RUN=false
 replacement_value='replacement&value|with\backslash'
@@ -87,6 +150,32 @@ grep -Fqx "NEXUS_API_TOKEN=${replacement_value}" "$environment_file" \
 [[ "$(grep -Fc 'NEXUS_API_TOKEN=' "$environment_file")" -eq 1 ]] \
   || fail 'environment replacement created duplicate keys'
 
+ams_environment_file="${temporary_directory}/ams.env"
+subs_environment_file="${temporary_directory}/subs.env"
+touch "$ams_environment_file" "$subs_environment_file"
+for shared_environment_file in "$ams_environment_file" "$subs_environment_file"; do
+  set_env_kv 'SUBS_REDIS_HMAC_SECRET' "$generated_secret" "$shared_environment_file" 'secret'
+  set_env_kv 'BUILD_COMMIT' "$TEST_SUBS_COMMIT" "$shared_environment_file"
+  set_env_kv 'NEXUS_RELEASE_ID' "$TEST_RELEASE_ID" "$shared_environment_file"
+  set_env_kv 'PW_API_TOKEN' 'synthetic-subs-key' "$shared_environment_file" 'secret'
+done
+cmp -s "$ams_environment_file" "$subs_environment_file" \
+  || fail 'shared AMS and Subs environment values diverged'
+
+git_repository="${temporary_directory}/checked-out-repository"
+mkdir -p "$git_repository"
+git -C "$git_repository" init -q
+git -C "$git_repository" config user.email 'contract-test@example.test'
+git -C "$git_repository" config user.name 'Contract Test'
+printf 'fixture\n' > "${git_repository}/fixture.txt"
+git -C "$git_repository" add fixture.txt
+git -C "$git_repository" commit -qm 'contract fixture'
+checked_commit="$(git -C "$git_repository" rev-parse HEAD)"
+[[ "$(checked_out_commit "$git_repository")" == "$checked_commit" ]] \
+  || fail 'checked-out commit was not read from the actual repository'
+[[ "$(development_release_id "$checked_commit")" == "development-${checked_commit:0:12}" ]] \
+  || fail 'development release ID was not derived from the checked-out commit'
+
 printf 'NEXUS_RUNTIME="standalone"\nNEXUS_MANAGED=false\n' > "${temporary_directory}/read.env"
 [[ "$(read_env_value 'NEXUS_RUNTIME' "${temporary_directory}/read.env")" == 'standalone' ]] \
   || fail 'quoted runtime could not be read from an existing AMS environment'
@@ -96,7 +185,8 @@ prepare_config() {
   local app_path="$2"
 
   cp "${PROJECT_ROOT}/install.env" "$destination"
-  printf '\nAPP_PATH="%s"\nSUBS_PATH="%s/subs"\n' "$app_path" "$temporary_directory" >> "$destination"
+  printf '\nAPP_PATH="%s"\nSUBS_PATH="%s/subs"\nNEXUS_AMS_COMMIT="%s"\nNEXUS_SUBS_COMMIT="%s"\nNEXUS_RELEASE_ID="%s"\n' \
+    "$app_path" "$temporary_directory" "$TEST_AMS_COMMIT" "$TEST_SUBS_COMMIT" "$TEST_RELEASE_ID" >> "$destination"
 }
 
 standalone_directory="${temporary_directory}/standalone"
@@ -117,6 +207,23 @@ for profile in full app-web-subs-remote-db web-only db-only subs-only; do
     || fail "${profile} profile failed configuration validation"
 done
 
+stream_directory="${temporary_directory}/stream"
+mkdir -p "$stream_directory"
+prepare_config "${stream_directory}/install.env" "${stream_directory}/app"
+printf 'SUBS_DELIVERY_DRIVER="redis-stream"\nSUBS_REDIS_URL="redis://127.0.0.1:6379/3"\nSUBS_REDIS_HMAC_SECRET="%s"\n' \
+  "$generated_secret" >> "${stream_directory}/install.env"
+(cd "$stream_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null) \
+  || fail 'valid Redis Streams HMAC configuration failed check-config'
+
+short_secret_directory="${temporary_directory}/stream-short-secret"
+mkdir -p "$short_secret_directory"
+prepare_config "${short_secret_directory}/install.env" "${short_secret_directory}/app"
+printf 'SUBS_DELIVERY_DRIVER="redis-stream"\nSUBS_REDIS_URL="redis://127.0.0.1:6379/3"\nSUBS_REDIS_HMAC_SECRET="too-short"\n' \
+  >> "${short_secret_directory}/install.env"
+if (cd "$short_secret_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null 2>&1); then
+  fail 'check-config accepted a short Redis Streams HMAC secret'
+fi
+
 invalid_profile_directory="${temporary_directory}/profile-invalid"
 mkdir -p "$invalid_profile_directory"
 prepare_config "${invalid_profile_directory}/install.env" "${invalid_profile_directory}/app"
@@ -124,6 +231,24 @@ printf 'INSTALL_PROFILE="invalid"\n' >> "${invalid_profile_directory}/install.en
 
 if (cd "$invalid_profile_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null 2>&1); then
   fail 'unknown install profile passed configuration validation'
+fi
+
+missing_provenance_directory="${temporary_directory}/missing-provenance"
+mkdir -p "$missing_provenance_directory"
+prepare_config "${missing_provenance_directory}/install.env" "${missing_provenance_directory}/app"
+printf 'NEXUS_SUBS_COMMIT=""\nALLOW_UNPINNED_DEVELOPMENT="true"\n' >> "${missing_provenance_directory}/install.env"
+
+if (cd "$missing_provenance_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null 2>&1); then
+  fail 'check-config accepted missing provenance in noninteractive mode'
+fi
+
+invalid_release_directory="${temporary_directory}/invalid-release"
+mkdir -p "$invalid_release_directory"
+prepare_config "${invalid_release_directory}/install.env" "${invalid_release_directory}/app"
+printf 'NEXUS_RELEASE_ID="release with spaces"\n' >> "${invalid_release_directory}/install.env"
+
+if (cd "$invalid_release_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null 2>&1); then
+  fail 'check-config accepted an unsafe release ID'
 fi
 
 hosted_directory="${temporary_directory}/hosted"
@@ -162,6 +287,24 @@ grep -Fq 'SUBS_DELIVERY_DRIVER:=http' "${PROJECT_ROOT}/installer_helpers.sh" \
   || fail 'legacy Subs HTTP delivery is not the default'
 grep -Fq 'redis-stream' "${PROJECT_ROOT}/install_nexus.sh" \
   || fail 'Subs Redis Stream delivery was removed'
+grep -Fq 'generate_subs_redis_hmac_secret' "${PROJECT_ROOT}/installer_helpers.sh" \
+  || fail 'HMAC secret generation is not available'
+grep -Fq 'subs_redis_hmac_secret_is_valid' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'HMAC secret validation is not enforced'
+grep -Fq 'read -r -s -p "Shared stream HMAC secret' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'HMAC secret prompt is not silent'
+grep -Fq 'fetch --no-tags origin' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'repository checkout is not pinned through fetch'
+grep -Fq 'checkout --detach' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'repository checkout is not detached at the requested commit'
+grep -Fq 'set_env_kv "BUILD_COMMIT" "$SUBS_CHECKED_OUT_COMMIT"' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'Subs BUILD_COMMIT is not written from the checked-out revision'
+grep -Fq 'set_env_kv "NEXUS_RELEASE_ID" "$NEXUS_RELEASE_ID"' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'Subs release provenance is not written'
+[[ "$(grep -Fc 'set_env_kv "SUBS_REDIS_HMAC_SECRET"' "${PROJECT_ROOT}/install_nexus.sh")" -eq 2 ]] \
+  || fail 'HMAC secret is not written to both AMS and Subs environments'
+grep -Fq 'set_env_kv "PW_API_TOKEN" "$PW_API_TOKEN"' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'explicit Subs API key is not preserved by the installer'
 grep -Fq 'if $INSTALL_PHP || $INSTALL_DB || $INSTALL_NGINX; then' "${PROJECT_ROOT}/install_nexus.sh" \
   || fail 'db-only profile cannot enter the database installation stage'
 grep -Fq 'if $INSTALL_APP; then' "${PROJECT_ROOT}/install_nexus.sh" \
@@ -176,6 +319,7 @@ sensitive_keys=(
   PW_API_MUTATION_KEY
   PW_API_TOKEN
   REDIS_PASSWORD
+  SUBS_REDIS_HMAC_SECRET
   SUBS_REDIS_URL
 )
 
@@ -203,3 +347,6 @@ printf 'ok - hosted and world-writer modes fail closed\n'
 printf 'ok - existing managed installations are not converted\n'
 printf 'ok - credential writes are redacted and exact\n'
 printf 'ok - PHP, Node, schedules, sync, and Subs contracts remain explicit\n'
+printf 'ok - HMAC secret generation, validation, and environment parity\n'
+printf 'ok - pinned checkout and release provenance fail closed\n'
+printf 'ok - development provenance is explicit and derived from the actual checkout\n'

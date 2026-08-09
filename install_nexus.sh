@@ -309,6 +309,24 @@ interactive_prompt() {
     *) INSTALL_PROFILE="full" ;;
   esac
 
+  echo ""
+  echo "Immutable repository provenance:"
+  local default_ams_repository="https://github.com/Yosodog/Nexus-AMS.git"
+  local default_subs_repository="https://github.com/Yosodog/Nexus-AMS-Subs.git"
+  read -r -p "Nexus AMS repository [${default_ams_repository}]: " NEXUS_AMS_REPOSITORY
+  NEXUS_AMS_REPOSITORY="${NEXUS_AMS_REPOSITORY:-$default_ams_repository}"
+  read -r -p "Nexus AMS commit (40-character SHA; blank only for development): " NEXUS_AMS_COMMIT
+  read -r -p "Nexus Subs repository [${default_subs_repository}]: " NEXUS_SUBS_REPOSITORY
+  NEXUS_SUBS_REPOSITORY="${NEXUS_SUBS_REPOSITORY:-$default_subs_repository}"
+  read -r -p "Nexus Subs commit (40-character SHA; blank only for development): " NEXUS_SUBS_COMMIT
+  read -r -p "Allow unpinned development checkouts? [y/N]: " allow_unpinned_answer
+  if is_true_value "$allow_unpinned_answer"; then
+    ALLOW_UNPINNED_DEVELOPMENT="true"
+  else
+    ALLOW_UNPINNED_DEVELOPMENT="false"
+  fi
+  read -r -p "Immutable release ID [required unless development mode]: " NEXUS_RELEASE_ID
+
   # Swap config
   echo ""
   echo "Swap configuration:"
@@ -371,6 +389,7 @@ interactive_prompt() {
   SUBS_REDIS_READ_COUNT="10"
   SUBS_REDIS_CLAIM_IDLE_MS="60000"
   SUBS_REDIS_MAX_DELIVERIES="5"
+  SUBS_REDIS_HMAC_SECRET=""
 
   if [[ "$subs_delivery_choice" == "2" ]]; then
     SUBS_DELIVERY_DRIVER="redis-stream"
@@ -387,9 +406,23 @@ interactive_prompt() {
 
     read -r -p "Redis stream [nexus:subscriptions:v1]: " SUBS_REDIS_STREAM_INPUT
     SUBS_REDIS_STREAM="${SUBS_REDIS_STREAM_INPUT:-$SUBS_REDIS_STREAM}"
+
+    echo ""
+    read -r -s -p "Shared stream HMAC secret (blank generates one for a combined install): " SUBS_REDIS_HMAC_SECRET
+    echo ""
+    if [[ -z "$SUBS_REDIS_HMAC_SECRET" ]]; then
+      if [[ "$INSTALL_PROFILE" == "web-only" || "$INSTALL_PROFILE" == "subs-only" ]]; then
+        die "Split Redis Streams installs require the same pre-generated SUBS_REDIS_HMAC_SECRET on both hosts."
+      fi
+
+      SUBS_REDIS_HMAC_SECRET="$(generate_subs_redis_hmac_secret)" \
+        || die "Could not generate SUBS_REDIS_HMAC_SECRET."
+      echo "Generated a stream HMAC secret and stored it in install.env; the value is not displayed."
+    fi
   else
     SUBS_DELIVERY_DRIVER="http"
     SUBS_REDIS_URL=""
+    SUBS_REDIS_HMAC_SECRET=""
   fi
 
   # Nexus / PW config
@@ -465,6 +498,10 @@ interactive_prompt() {
   echo "Redis maxmemory:   ${REDIS_MAX_MEMORY:-N/A}"
   echo "Subs delivery:     $SUBS_DELIVERY_DRIVER"
   echo "Subs stream:       ${SUBS_REDIS_STREAM:-N/A}"
+  echo "AMS commit:        ${NEXUS_AMS_COMMIT:-development checkout}"
+  echo "Subs commit:       ${NEXUS_SUBS_COMMIT:-development checkout}"
+  echo "Release ID:        ${NEXUS_RELEASE_ID:-derived development release}"
+  echo "Unpinned development: ${ALLOW_UNPINNED_DEVELOPMENT}"
   echo "NEXUS_API_URL:     $NEXUS_API_URL"
   echo "Enable snapshots:  $ENABLE_SNAPSHOTS"
   echo "Create admin user: $CREATE_ADMIN_USER"
@@ -511,6 +548,14 @@ SUBS_REDIS_BLOCK_MS="$SUBS_REDIS_BLOCK_MS"
 SUBS_REDIS_READ_COUNT="$SUBS_REDIS_READ_COUNT"
 SUBS_REDIS_CLAIM_IDLE_MS="$SUBS_REDIS_CLAIM_IDLE_MS"
 SUBS_REDIS_MAX_DELIVERIES="$SUBS_REDIS_MAX_DELIVERIES"
+SUBS_REDIS_HMAC_SECRET="$SUBS_REDIS_HMAC_SECRET"
+
+NEXUS_AMS_REPOSITORY="$NEXUS_AMS_REPOSITORY"
+NEXUS_AMS_COMMIT="$NEXUS_AMS_COMMIT"
+NEXUS_SUBS_REPOSITORY="$NEXUS_SUBS_REPOSITORY"
+NEXUS_SUBS_COMMIT="$NEXUS_SUBS_COMMIT"
+NEXUS_RELEASE_ID="$NEXUS_RELEASE_ID"
+ALLOW_UNPINNED_DEVELOPMENT="$ALLOW_UNPINNED_DEVELOPMENT"
 
 NEXUS_API_URL="$NEXUS_API_URL"
 NEXUS_API_TOKEN="$NEXUS_API_TOKEN"
@@ -592,7 +637,19 @@ if [[ "$SUBS_DELIVERY_DRIVER" == "redis-stream" && ! "$SUBS_REDIS_URL" =~ ^redis
   die "SUBS_REDIS_URL must use a redis:// or rediss:// URL."
 fi
 
+if [[ "$SUBS_DELIVERY_DRIVER" == "redis-stream" ]] && ! subs_redis_hmac_secret_is_valid "$SUBS_REDIS_HMAC_SECRET"; then
+  die "SUBS_REDIS_HMAC_SECRET must be configured with at least 32 characters for Redis Streams delivery."
+fi
+
 set_profile_flags "${INSTALL_PROFILE:-full}"
+
+PROVENANCE_MODE="interactive"
+if $FORCE_NON_INTERACTIVE; then
+  PROVENANCE_MODE="noninteractive"
+fi
+
+validate_provenance_configuration "$PROVENANCE_MODE" "$INSTALL_APP" "$INSTALL_SUBS" \
+  || die "Pinned repository commits and release provenance are required for this install mode."
 
 if $INSTALL_APP && [[ -f "$APP_PATH/.env" ]]; then
   existing_runtime="$(read_env_value "NEXUS_RUNTIME" "$APP_PATH/.env")"
@@ -783,6 +840,50 @@ stage_php_web_stack() {
   fi
 }
 
+checkout_repository() {
+  local label="$1"
+  local repository="$2"
+  local destination="$3"
+  local requested_commit="$4"
+  local output_variable="$5"
+
+  if [[ -e "$destination" && ! -d "$destination/.git" ]]; then
+    die "${label} path exists but is not a Git checkout: ${destination}"
+  fi
+
+  if [[ ! -d "$destination/.git" ]]; then
+    run "git clone --no-tags \"$repository\" \"$destination\""
+  fi
+
+  if [[ -n "$requested_commit" ]]; then
+    run "git -C \"$destination\" fetch --no-tags origin \"$requested_commit\""
+    run "git -C \"$destination\" checkout --detach \"$requested_commit\""
+  elif ! is_true_value "${ALLOW_UNPINNED_DEVELOPMENT:-false}" || $FORCE_NON_INTERACTIVE; then
+    die "${label} requires an explicit 40-character commit SHA outside interactive development mode."
+  else
+    warn "${label} is using the current remote default branch because unpinned development mode was explicitly enabled."
+  fi
+
+  if $DRY_RUN; then
+    if [[ -n "$requested_commit" ]]; then
+      printf -v "$output_variable" '%s' "$(lowercase_string "$requested_commit")"
+    else
+      printf -v "$output_variable" '%s' "development-unpinned"
+    fi
+    return
+  fi
+
+  local actual_commit
+  actual_commit="$(checked_out_commit "$destination")" \
+    || die "Could not determine the checked-out ${label} commit."
+
+  if [[ -n "$requested_commit" && "$(lowercase_string "$actual_commit")" != "$(lowercase_string "$requested_commit")" ]]; then
+    die "${label} checkout is ${actual_commit}, expected ${requested_commit}."
+  fi
+
+  printf -v "$output_variable" '%s' "$actual_commit"
+}
+
 stage_clone_apps() {
   if ! $INSTALL_APP && ! $INSTALL_SUBS; then
     return
@@ -790,22 +891,34 @@ stage_clone_apps() {
 
   log "Stage 4: Clone Nexus AMS and Subs"
 
+  AMS_CHECKED_OUT_COMMIT=""
+  SUBS_CHECKED_OUT_COMMIT=""
+
   if $INSTALL_APP; then
     run "mkdir -p $(dirname "$APP_PATH")"
-    if [[ ! -d "$APP_PATH/.git" ]]; then
-      run "cd $(dirname "$APP_PATH") && git clone https://github.com/Yosodog/Nexus-AMS.git"
-      if [[ "$APP_PATH" != "$(dirname "$APP_PATH")/Nexus-AMS" ]]; then
-        run "mv $(dirname "$APP_PATH")/Nexus-AMS $APP_PATH"
-      fi
-    fi
+    checkout_repository \
+      "Nexus AMS" \
+      "$NEXUS_AMS_REPOSITORY" \
+      "$APP_PATH" \
+      "$NEXUS_AMS_COMMIT" \
+      AMS_CHECKED_OUT_COMMIT
   fi
 
   if $INSTALL_SUBS; then
     run "mkdir -p $(dirname "$SUBS_PATH")"
-    if [[ ! -d "$SUBS_PATH/.git" ]]; then
-      run "cd $(dirname "$SUBS_PATH") && git clone https://github.com/Yosodog/Nexus-AMS-Subs.git"
-      if [[ "$SUBS_PATH" != "$(dirname "$SUBS_PATH")/Nexus-AMS-Subs" ]]; then
-        run "mv $(dirname "$SUBS_PATH")/Nexus-AMS-Subs $SUBS_PATH"
+    checkout_repository \
+      "Nexus Subs" \
+      "$NEXUS_SUBS_REPOSITORY" \
+      "$SUBS_PATH" \
+      "$NEXUS_SUBS_COMMIT" \
+      SUBS_CHECKED_OUT_COMMIT
+
+    if [[ -z "${NEXUS_RELEASE_ID:-}" ]]; then
+      if $DRY_RUN; then
+        NEXUS_RELEASE_ID="development-dry-run"
+      else
+        NEXUS_RELEASE_ID="$(development_release_id "$SUBS_CHECKED_OUT_COMMIT")" \
+          || die "Could not derive a development release ID from the checked-out Subs commit."
       fi
     fi
   fi
@@ -949,6 +1062,7 @@ stage_laravel_backend() {
   set_env_kv "SUBS_REDIS_READ_COUNT" "$SUBS_REDIS_READ_COUNT" "$ENV_FILE"
   set_env_kv "SUBS_REDIS_CLAIM_IDLE_MS" "$SUBS_REDIS_CLAIM_IDLE_MS" "$ENV_FILE"
   set_env_kv "SUBS_REDIS_MAX_DELIVERIES" "$SUBS_REDIS_MAX_DELIVERIES" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_HMAC_SECRET" "$SUBS_REDIS_HMAC_SECRET" "$ENV_FILE" "secret"
 
   run "cd $APP_PATH && $PHP_BINARY /usr/local/bin/composer install --no-dev --optimize-autoloader --no-interaction"
   run "cd $APP_PATH && $PHP_BINARY /usr/local/bin/composer check-platform-reqs --no-dev"
@@ -994,6 +1108,9 @@ stage_subs_install() {
   set_env_kv "DELIVERY_DRIVER" "$SUBS_DELIVERY_DRIVER" "$ENV_FILE"
   set_env_kv "SUBS_REDIS_URL" "$SUBS_REDIS_URL" "$ENV_FILE" "secret"
   set_env_kv "SUBS_REDIS_STREAM" "$SUBS_REDIS_STREAM" "$ENV_FILE"
+  set_env_kv "SUBS_REDIS_HMAC_SECRET" "$SUBS_REDIS_HMAC_SECRET" "$ENV_FILE" "secret"
+  set_env_kv "BUILD_COMMIT" "$SUBS_CHECKED_OUT_COMMIT" "$ENV_FILE"
+  set_env_kv "NEXUS_RELEASE_ID" "$NEXUS_RELEASE_ID" "$ENV_FILE"
 
   run "cd $SUBS_PATH && npm ci"
   run "chown -R $WEB_USER:$WEB_USER $SUBS_PATH"
@@ -1408,6 +1525,9 @@ echo "Redis enabled:       ${USE_REDIS:-false}"
 echo "Redis maxmemory:     ${REDIS_MAX_MEMORY:-N/A}"
 echo "Subs delivery:       ${SUBS_DELIVERY_DRIVER:-http}"
 echo "Subs stream:         ${SUBS_REDIS_STREAM:-N/A}"
+echo "AMS commit:          ${AMS_CHECKED_OUT_COMMIT:-N/A}"
+echo "Subs commit:         ${SUBS_CHECKED_OUT_COMMIT:-N/A}"
+echo "Release ID:          ${NEXUS_RELEASE_ID:-N/A}"
 echo "Swap enabled:        ${ENABLE_SWAP:-true}"
 echo "Swap size (GB):      ${SWAP_SIZE_GB:-4}"
 echo "Certbot email:       ${CERTBOT_EMAIL:-N/A}"

@@ -46,7 +46,8 @@ The goal is a one-command, unattended deployment of a ready-to-use Nexus AMS ins
     
 3.  Installs PHP 8.3, MySQL, and Nginx.
     
-4.  Clones both the **Nexus AMS** and **Nexus-AMS-Subs** repositories.
+4.  Clones both the **Nexus AMS** and **Nexus-AMS-Subs** repositories at the
+    explicitly configured commits.
     
 5.  Installs Node 22 LTS and Composer 2.
     
@@ -75,7 +76,7 @@ All output is logged to `/var/log/nexus-install.log`.
 
 ```
 /install_nexus.sh     # Main installation script
-/installer_helpers.sh # Tested defaults, runtime validation, and safe environment writes
+/installer_helpers.sh # Tested defaults, provenance, HMAC, and safe environment writes
 /install.env          # Configuration file (must be edited before running)
 /tests/install_contract_test.sh # Standalone compatibility checks
 README.md
@@ -108,6 +109,7 @@ nano install.env
 Then run the installer:
 
 ```bash
+# Set NEXUS_AMS_COMMIT, NEXUS_SUBS_COMMIT, and NEXUS_RELEASE_ID first.
 ./install_nexus.sh --check-config
 sudo ./install_nexus.sh --non-interactive
 
@@ -136,6 +138,12 @@ SWAP_SIZE_GB="4"
 NODE_BUILD_MAX_OLD_SPACE="2048"
 NEXUS_RUNTIME="standalone"
 NEXUS_MANAGED="false"
+NEXUS_AMS_REPOSITORY="https://github.com/Yosodog/Nexus-AMS.git"
+NEXUS_AMS_COMMIT="" # Full 40-character SHA required for production/noninteractive AMS installs
+NEXUS_SUBS_REPOSITORY="https://github.com/Yosodog/Nexus-AMS-Subs.git"
+NEXUS_SUBS_COMMIT="" # Full 40-character SHA required for production/noninteractive Subs installs
+NEXUS_RELEASE_ID="" # Required for production/noninteractive Subs installs
+ALLOW_UNPINNED_DEVELOPMENT="false" # Interactive-only local development escape hatch
 
 # ========== DATABASE ==========
 DB_HOST="127.0.0.1"
@@ -162,6 +170,7 @@ ENABLE_SNAPSHOTS="false" # Should leave to false until we can get snapshots to w
 SUBS_DELIVERY_DRIVER="http" # http or redis-stream
 SUBS_REDIS_URL="" # For a local full install use redis://127.0.0.1:6379/3
 SUBS_REDIS_STREAM="nexus:subscriptions:v1"
+SUBS_REDIS_HMAC_SECRET="" # Required for redis-stream; use the same 32+ character secret on AMS and Subs
 SUBS_REDIS_GROUP="nexus-ams"
 SUBS_REDIS_BLOCK_MS="5000"
 SUBS_REDIS_READ_COUNT="10"
@@ -185,7 +194,14 @@ Legacy noninteractive files may omit the runtime, profile, database-host,
 Redis, and newer stream settings. They default to `standalone`, `full`,
 `127.0.0.1`, disabled local Redis, and HTTP Subs delivery, preserving the
 pre-Cloud install path. `PW_API_TOKEN` defaults to `PW_API_KEY` only when a
-separate Subs key was not configured.
+separate Subs key was not configured. Repository commits and
+`NEXUS_RELEASE_ID` are intentionally not defaulted: production and
+noninteractive installs fail closed until immutable provenance is supplied.
+
+Interactive development may set `ALLOW_UNPINNED_DEVELOPMENT=true`. That mode is
+never accepted by `--non-interactive` or `--check-config`; it records the
+actual checked-out Subs commit and derives a `development-<short-sha>` release
+ID. Do not use that mode for production.
 
 ## Standalone Runtime Compatibility
 
@@ -284,6 +300,18 @@ For split `web-only` and `subs-only` installations, configure both hosts with
 the same private `redis://` or TLS `rediss://` URL. The installer deliberately
 does not change Redis bind addresses or open port 6379. Provision private
 networking, TLS, authentication, ACLs, and firewall rules outside this script.
+
+Redis Stream entries are authenticated with HMAC-SHA256. Configure the same
+`SUBS_REDIS_HMAC_SECRET` in each split host's `install.env`; it must contain at
+least 32 characters. A combined interactive installation generates a 256-bit
+secret when the prompt is left blank. The installer writes the same secret to
+both AMS and Subs `.env` files, keeps environment files mode `0600`, and
+redacts secret assignments in dry-run output. The HMAC value is never printed.
+
+The generated Subs `.env` also receives `BUILD_COMMIT` from the checked-out
+Subs repository and the configured `NEXUS_RELEASE_ID`. The installer verifies
+the actual checkout matches the requested full SHA before writing that
+metadata.
 
 The HTTP URL and token remain configured as a manual backup. To roll back:
 

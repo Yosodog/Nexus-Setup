@@ -7,6 +7,8 @@ TEST_AMS_COMMIT="$(printf 'a%.0s' {1..40})"
 TEST_SUBS_COMMIT="$(printf 'b%.0s' {1..40})"
 TEST_RELEASE_ID='release-contract-test'
 
+unset NEXUS_TENANT_EVENTS_ENABLED
+
 # shellcheck source=../installer_helpers.sh
 source "${PROJECT_ROOT}/installer_helpers.sh"
 
@@ -78,6 +80,17 @@ fi
 
 if validate_standalone_runtime 'world-writer' 'false' >/dev/null 2>&1; then
   fail 'world-writer runtime is accepted'
+fi
+
+if validate_standalone_runtime 'standalone' 'maybe' >/dev/null 2>&1; then
+  fail 'an invalid managed-mode value is accepted'
+fi
+
+validate_standalone_disabled_flag 'NEXUS_TENANT_EVENTS_ENABLED' 'false' \
+  || fail 'a disabled tenant-event consumer is rejected'
+
+if validate_standalone_disabled_flag 'NEXUS_TENANT_EVENTS_ENABLED' 'true' >/dev/null 2>&1; then
+  fail 'an enabled hosted tenant-event consumer is accepted'
 fi
 
 validate_no_cloud_configuration '' '' || fail 'empty hosted-only configuration is rejected'
@@ -180,6 +193,61 @@ printf 'NEXUS_RUNTIME="standalone"\nNEXUS_MANAGED=false\n' > "${temporary_direct
 [[ "$(read_env_value 'NEXUS_RUNTIME' "${temporary_directory}/read.env")" == 'standalone' ]] \
   || fail 'quoted runtime could not be read from an existing AMS environment'
 
+printf 'NEXUS_RUNTIME=standalone # local runtime\nNEXUS_MANAGED="false" # unmanaged\nNEXUS_TENANT_EVENTS_ENABLED=false # disabled\n' \
+  > "${temporary_directory}/read-comments.env"
+[[ "$(read_env_value 'NEXUS_RUNTIME' "${temporary_directory}/read-comments.env")" == 'standalone' ]] \
+  || fail 'runtime with an inline comment could not be read from an existing AMS environment'
+[[ "$(read_env_value 'NEXUS_MANAGED' "${temporary_directory}/read-comments.env")" == 'false' ]] \
+  || fail 'quoted managed flag with an inline comment could not be read from an existing AMS environment'
+[[ "$(read_env_value 'NEXUS_TENANT_EVENTS_ENABLED' "${temporary_directory}/read-comments.env")" == 'false' ]] \
+  || fail 'tenant-event flag with an inline comment could not be read from an existing AMS environment'
+
+decorated_environment_file="${temporary_directory}/decorated.env"
+printf '  export NEXUS_RUNTIME = hosted-tenant\nNEXUS_RUNTIME=world-writer\nNEXUS_MANAGED=false\n' \
+  > "$decorated_environment_file"
+set_env_kv 'NEXUS_RUNTIME' 'standalone' "$decorated_environment_file"
+[[ "$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?NEXUS_RUNTIME[[:space:]]*=' "$decorated_environment_file")" -eq 1 ]] \
+  || fail 'decorated environment replacement created a duplicate key'
+grep -Fqx 'NEXUS_RUNTIME=standalone' "$decorated_environment_file" \
+  || fail 'decorated environment key was not normalized exactly'
+
+inherited_environment_file="${temporary_directory}/inherited-hosted.env"
+cat > "$inherited_environment_file" <<'EOF'
+NEXUS_RUNTIME=hosted-tenant
+NEXUS_MANAGED=true
+NEXUS_TENANT_ID=01JTESTTENANT
+NEXUS_BOOTSTRAP_INTROSPECTION_URL=https://cloud.invalid/bootstrap
+NEXUS_CONTROL_CALLBACK_URL=https://cloud.invalid/callback
+NEXUS_CONTROL_CALLBACK_KEY_FILE=/run/secrets/callback
+NEXUS_TENANT_EVENTS_ENABLED=true
+NEXUS_TENANT_EVENTS_KEY_FILE=/run/secrets/events
+NEXUS_TENANT_EVENTS_CONSUMER=tenant-test
+NEXUS_TENANT_EVENTS_REDIS_URL=rediss://redis.invalid/4
+NEXUS_TENANT_EVENTS_REDIS_USERNAME=tenant-test
+NEXUS_TENANT_EVENTS_REDIS_PASSWORD=synthetic-password
+EOF
+configure_standalone_runtime_environment "$inherited_environment_file"
+
+[[ "$(read_env_value 'NEXUS_RUNTIME' "$inherited_environment_file")" == 'standalone' ]] \
+  || fail 'fresh environment did not force standalone runtime'
+[[ "$(read_env_value 'NEXUS_MANAGED' "$inherited_environment_file")" == 'false' ]] \
+  || fail 'fresh environment did not disable managed mode'
+[[ "$(read_env_value 'NEXUS_TENANT_EVENTS_ENABLED' "$inherited_environment_file")" == 'false' ]] \
+  || fail 'fresh environment did not disable hosted tenant events'
+for hosted_key in \
+  NEXUS_TENANT_ID \
+  NEXUS_BOOTSTRAP_INTROSPECTION_URL \
+  NEXUS_CONTROL_CALLBACK_URL \
+  NEXUS_CONTROL_CALLBACK_KEY_FILE \
+  NEXUS_TENANT_EVENTS_KEY_FILE \
+  NEXUS_TENANT_EVENTS_CONSUMER \
+  NEXUS_TENANT_EVENTS_REDIS_URL \
+  NEXUS_TENANT_EVENTS_REDIS_USERNAME \
+  NEXUS_TENANT_EVENTS_REDIS_PASSWORD; do
+  [[ -z "$(read_env_value "$hosted_key" "$inherited_environment_file")" ]] \
+    || fail "fresh environment retained hosted-only ${hosted_key}"
+done
+
 prepare_config() {
   local destination="$1"
   local app_path="$2"
@@ -260,6 +328,50 @@ if (cd "$hosted_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-co
   fail 'hosted install.env passed the standalone installer check'
 fi
 
+tenant_events_directory="${temporary_directory}/tenant-events-enabled"
+mkdir -p "$tenant_events_directory"
+prepare_config "${tenant_events_directory}/install.env" "${tenant_events_directory}/app"
+printf 'NEXUS_TENANT_EVENTS_ENABLED="true"\n' >> "${tenant_events_directory}/install.env"
+
+if (cd "$tenant_events_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null 2>&1); then
+  fail 'hosted tenant-event consumption passed the standalone installer check'
+fi
+
+hosted_install_keys=(
+  NEXUS_TENANT_ID
+  NEXUS_CONTROL_CALLBACK_URL
+  NEXUS_CONTROL_CALLBACK_KEY_FILE
+  NEXUS_BOOTSTRAP_INTROSPECTION_URL
+  NEXUS_TENANT_EVENTS_KEY_FILE
+  NEXUS_TENANT_EVENTS_CONSUMER
+  NEXUS_TENANT_EVENTS_REDIS_URL
+  NEXUS_TENANT_EVENTS_REDIS_USERNAME
+  NEXUS_TENANT_EVENTS_REDIS_PASSWORD
+)
+hosted_install_values=(
+  01JTESTTENANT
+  https://cloud.invalid/callback
+  /run/secrets/callback
+  https://cloud.invalid/bootstrap
+  /run/secrets/events
+  tenant-test
+  rediss://redis.invalid/4
+  tenant-test
+  synthetic-password
+)
+
+for index in "${!hosted_install_keys[@]}"; do
+  hosted_value_directory="${temporary_directory}/hosted-value-${index}"
+  mkdir -p "$hosted_value_directory"
+  prepare_config "${hosted_value_directory}/install.env" "${hosted_value_directory}/app"
+  printf '%s="%s"\n' "${hosted_install_keys[$index]}" "${hosted_install_values[$index]}" \
+    >> "${hosted_value_directory}/install.env"
+
+  if (cd "$hosted_value_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null 2>&1); then
+    fail "install.env accepted hosted-only ${hosted_install_keys[$index]}"
+  fi
+done
+
 existing_hosted_directory="${temporary_directory}/existing-hosted"
 mkdir -p "${existing_hosted_directory}/app"
 prepare_config "${existing_hosted_directory}/install.env" "${existing_hosted_directory}/app"
@@ -269,16 +381,57 @@ if (cd "$existing_hosted_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" -
   fail 'an existing hosted AMS environment was converted to standalone'
 fi
 
+existing_tenant_events_directory="${temporary_directory}/existing-tenant-events"
+mkdir -p "${existing_tenant_events_directory}/app"
+prepare_config \
+  "${existing_tenant_events_directory}/install.env" \
+  "${existing_tenant_events_directory}/app"
+printf 'NEXUS_RUNTIME=standalone\nNEXUS_MANAGED=false\nNEXUS_TENANT_EVENTS_ENABLED=true\n' \
+  > "${existing_tenant_events_directory}/app/.env"
+
+if (cd "$existing_tenant_events_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null 2>&1); then
+  fail 'an existing standalone AMS environment enabled hosted tenant events'
+fi
+
+existing_hosted_values_directory="${temporary_directory}/existing-hosted-values"
+mkdir -p "${existing_hosted_values_directory}/app"
+prepare_config \
+  "${existing_hosted_values_directory}/install.env" \
+  "${existing_hosted_values_directory}/app"
+cat > "${existing_hosted_values_directory}/app/.env" <<'EOF'
+NEXUS_RUNTIME=standalone
+NEXUS_MANAGED=false
+NEXUS_TENANT_EVENTS_ENABLED=false
+NEXUS_CONTROL_CALLBACK_KEY_FILE=/run/secrets/callback
+NEXUS_TENANT_EVENTS_KEY_FILE=/run/secrets/events
+EOF
+
+if (cd "$existing_hosted_values_directory" && bash "${PROJECT_ROOT}/install_nexus.sh" --check-config >/dev/null 2>&1); then
+  fail 'an existing standalone AMS environment retained hosted-only key references'
+fi
+
 grep -Fq 'readonly INSTALLER_PHP_VERSION="8.3"' "${PROJECT_ROOT}/install_nexus.sh" \
   || fail 'installer PHP version is not pinned to 8.3'
 grep -Fq 'readonly INSTALLER_NODE_MAJOR="22"' "${PROJECT_ROOT}/install_nexus.sh" \
   || fail 'installer Node major is not pinned to 22'
 ! grep -Fq 'php8.5' "${PROJECT_ROOT}/install_nexus.sh" \
   || fail 'unsupported PHP 8.5 package remains in the installer'
-grep -Fq 'set_env_kv "NEXUS_RUNTIME" "standalone"' "${PROJECT_ROOT}/install_nexus.sh" \
+grep -Fq 'configure_standalone_runtime_environment "$ENV_FILE"' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'standalone runtime environment normalization is not invoked'
+grep -Fq 'set_env_kv "NEXUS_RUNTIME" "standalone"' "${PROJECT_ROOT}/installer_helpers.sh" \
   || fail 'standalone runtime is not written to the AMS environment'
-grep -Fq 'set_env_kv "NEXUS_MANAGED" "false"' "${PROJECT_ROOT}/install_nexus.sh" \
+grep -Fq 'set_env_kv "NEXUS_MANAGED" "false"' "${PROJECT_ROOT}/installer_helpers.sh" \
   || fail 'managed mode is not disabled in the AMS environment'
+grep -Fq 'set_env_kv "NEXUS_TENANT_EVENTS_ENABLED" "false"' \
+  "${PROJECT_ROOT}/installer_helpers.sh" \
+  || fail 'hosted tenant-event consumption is not disabled in the AMS environment'
+grep -Fq 'set_env_kv "CACHE_STORE" "redis"' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'Redis installs do not select the current AMS cache store key'
+grep -Fq 'set_env_kv "CACHE_STORE" "file"' "${PROJECT_ROOT}/install_nexus.sh" \
+  || fail 'non-Redis installs do not select the current AMS cache store key'
+if grep -Fq 'set_env_kv "CACHE_DRIVER"' "${PROJECT_ROOT}/install_nexus.sh"; then
+  fail 'installer still writes the legacy cache driver key ignored by current AMS'
+fi
 grep -Fq 'artisan sync:nations' "${PROJECT_ROOT}/install_nexus.sh" \
   || fail 'standalone nation synchronization was removed'
 grep -Fq 'artisan schedule:run' "${PROJECT_ROOT}/install_nexus.sh" \

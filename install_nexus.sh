@@ -612,13 +612,21 @@ apply_installer_defaults
 
 validate_standalone_runtime "$NEXUS_RUNTIME" "$NEXUS_MANAGED" \
   || die "Hosted and world-writer runtimes require the Nexus Cloud deployment path."
+validate_standalone_disabled_flag \
+  "NEXUS_TENANT_EVENTS_ENABLED" \
+  "${NEXUS_TENANT_EVENTS_ENABLED:-false}" \
+  || die "Tenant-event consumption requires the Nexus Cloud deployment path."
 
 validate_no_cloud_configuration \
   "${NEXUS_TENANT_ID:-}" \
   "${NEXUS_CONTROL_CALLBACK_URL:-}" \
   "${NEXUS_CONTROL_CALLBACK_KEY_FILE:-}" \
   "${NEXUS_BOOTSTRAP_INTROSPECTION_URL:-}" \
+  "${NEXUS_TENANT_EVENTS_KEY_FILE:-}" \
+  "${NEXUS_TENANT_EVENTS_CONSUMER:-}" \
   "${NEXUS_TENANT_EVENTS_REDIS_URL:-}" \
+  "${NEXUS_TENANT_EVENTS_REDIS_USERNAME:-}" \
+  "${NEXUS_TENANT_EVENTS_REDIS_PASSWORD:-}" \
   || die "Remove hosted-only values before using the standalone installer."
 
 if [[ "$SUBS_DELIVERY_DRIVER" != "http" && "$SUBS_DELIVERY_DRIVER" != "redis-stream" ]]; then
@@ -655,12 +663,33 @@ if $INSTALL_APP && [[ -f "$APP_PATH/.env" ]]; then
   existing_runtime="$(read_env_value "NEXUS_RUNTIME" "$APP_PATH/.env")"
   existing_managed="$(read_env_value "NEXUS_MANAGED" "$APP_PATH/.env")"
   existing_tenant_id="$(read_env_value "NEXUS_TENANT_ID" "$APP_PATH/.env")"
+  existing_bootstrap_introspection_url="$(read_env_value "NEXUS_BOOTSTRAP_INTROSPECTION_URL" "$APP_PATH/.env")"
   existing_callback_url="$(read_env_value "NEXUS_CONTROL_CALLBACK_URL" "$APP_PATH/.env")"
+  existing_callback_key_file="$(read_env_value "NEXUS_CONTROL_CALLBACK_KEY_FILE" "$APP_PATH/.env")"
+  existing_tenant_events_enabled="$(read_env_value "NEXUS_TENANT_EVENTS_ENABLED" "$APP_PATH/.env")"
+  existing_tenant_events_key_file="$(read_env_value "NEXUS_TENANT_EVENTS_KEY_FILE" "$APP_PATH/.env")"
+  existing_tenant_events_consumer="$(read_env_value "NEXUS_TENANT_EVENTS_CONSUMER" "$APP_PATH/.env")"
+  existing_tenant_events_redis_url="$(read_env_value "NEXUS_TENANT_EVENTS_REDIS_URL" "$APP_PATH/.env")"
+  existing_tenant_events_redis_username="$(read_env_value "NEXUS_TENANT_EVENTS_REDIS_USERNAME" "$APP_PATH/.env")"
+  existing_tenant_events_redis_password="$(read_env_value "NEXUS_TENANT_EVENTS_REDIS_PASSWORD" "$APP_PATH/.env")"
 
   validate_standalone_runtime "${existing_runtime:-standalone}" "${existing_managed:-false}" \
     || die "Refusing to convert an existing managed AMS installation to standalone."
-  validate_no_cloud_configuration "$existing_tenant_id" "$existing_callback_url" \
+  validate_no_cloud_configuration \
+    "$existing_tenant_id" \
+    "$existing_bootstrap_introspection_url" \
+    "$existing_callback_url" \
+    "$existing_callback_key_file" \
+    "$existing_tenant_events_key_file" \
+    "$existing_tenant_events_consumer" \
+    "$existing_tenant_events_redis_url" \
+    "$existing_tenant_events_redis_username" \
+    "$existing_tenant_events_redis_password" \
     || die "Refusing to reuse an AMS environment with hosted-only Cloud configuration."
+  validate_standalone_disabled_flag \
+    "NEXUS_TENANT_EVENTS_ENABLED" \
+    "${existing_tenant_events_enabled:-false}" \
+    || die "Refusing to enable tenant-event consumption in a standalone AMS installation."
 fi
 
 if $CHECK_CONFIG; then
@@ -1008,9 +1037,7 @@ stage_laravel_backend() {
   set_env_kv "APP_ENV" "production" "$ENV_FILE"
   set_env_kv "APP_DEBUG" "false" "$ENV_FILE"
   set_env_kv "APP_URL" "$APP_URL" "$ENV_FILE"
-  set_env_kv "NEXUS_RUNTIME" "standalone" "$ENV_FILE"
-  set_env_kv "NEXUS_MANAGED" "false" "$ENV_FILE"
-  set_env_kv "NEXUS_TENANT_ID" "" "$ENV_FILE"
+  configure_standalone_runtime_environment "$ENV_FILE"
 
   set_env_kv "DB_CONNECTION" "mysql" "$ENV_FILE"
   set_env_kv "DB_HOST" "$DB_HOST" "$ENV_FILE"
@@ -1021,7 +1048,7 @@ stage_laravel_backend() {
 
   # Redis or DB/file
   if [[ "${USE_REDIS,,}" == "true" ]]; then
-    set_env_kv "CACHE_DRIVER" "redis" "$ENV_FILE"
+    set_env_kv "CACHE_STORE" "redis" "$ENV_FILE"
     set_env_kv "QUEUE_CONNECTION" "redis" "$ENV_FILE"
     set_env_kv "SESSION_DRIVER" "redis" "$ENV_FILE"
     set_env_kv "REDIS_CLIENT" "phpredis" "$ENV_FILE"
@@ -1034,7 +1061,7 @@ stage_laravel_backend() {
     set_env_kv "PULSE_INGEST_DRIVER" "redis" "$ENV_FILE"
     set_env_kv "PULSE_REDIS_CONNECTION" "pulse" "$ENV_FILE"
   else
-    set_env_kv "CACHE_DRIVER" "file" "$ENV_FILE"
+    set_env_kv "CACHE_STORE" "file" "$ENV_FILE"
     set_env_kv "QUEUE_CONNECTION" "database" "$ENV_FILE"
     set_env_kv "SESSION_DRIVER" "file" "$ENV_FILE"
     set_env_kv "PULSE_INGEST_DRIVER" "storage" "$ENV_FILE"

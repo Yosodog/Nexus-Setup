@@ -39,8 +39,10 @@ validate_standalone_runtime() {
   fi
 
   case "$managed" in
-    true|TRUE|True|1)
-      printf 'Nexus Setup cannot configure NEXUS_MANAGED=true.\n' >&2
+    false|FALSE|False|0)
+      ;;
+    *)
+      printf 'Nexus Setup requires NEXUS_MANAGED=false.\n' >&2
       return 1
       ;;
   esac
@@ -55,6 +57,20 @@ validate_no_cloud_configuration() {
       return 1
     fi
   done
+}
+
+validate_standalone_disabled_flag() {
+  local name="${1:-}"
+  local value="${2:-false}"
+
+  case "$value" in
+    false|FALSE|False|0)
+      ;;
+    *)
+      printf 'Nexus Setup requires %s=false.\n' "$name" >&2
+      return 1
+      ;;
+  esac
 }
 
 is_true_value() {
@@ -182,10 +198,30 @@ read_env_value() {
   [[ -f "$env_file" ]] || return 0
 
   awk -v key="$key" '
-    index($0, key "=") == 1 {
-      value = substr($0, length(key) + 2)
-      if (value ~ /^".*"$/ || value ~ /^\047.*\047$/) {
-        value = substr(value, 2, length(value) - 2)
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    {
+      line = $0
+      sub(/^[[:space:]]*export[[:space:]]+/, "", line)
+      separator = index(line, "=")
+      if (separator == 0 || trim(substr(line, 1, separator - 1)) != key) {
+        next
+      }
+
+      value = trim(substr(line, separator + 1))
+      quote = substr(value, 1, 1)
+      if (quote == "\"" || quote == "\047") {
+        value = substr(value, 2)
+        closing = index(value, quote)
+        if (closing > 0) {
+          value = substr(value, 1, closing - 1)
+        }
+      } else {
+        sub(/[[:space:]]+#.*/, "", value)
+        value = trim(value)
       }
       print value
       exit
@@ -219,10 +255,21 @@ set_env_kv() {
       value = ENVIRON["ENV_VALUE"]
       found = 0
     }
-    index($0, key "=") == 1 {
-      print key "=" value
-      found = 1
-      next
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      sub(/^export[[:space:]]+/, "", line)
+      separator = index(line, "=")
+      candidate = separator == 0 ? "" : substr(line, 1, separator - 1)
+      sub(/[[:space:]]+$/, "", candidate)
+
+      if (candidate == key) {
+        if (! found) {
+          print key "=" value
+        }
+        found = 1
+        next
+      }
     }
     { print }
     END {
@@ -241,4 +288,21 @@ set_env_kv() {
   fi
 
   rm -f "$temp_file"
+}
+
+configure_standalone_runtime_environment() {
+  local env_file="$1"
+
+  set_env_kv "NEXUS_RUNTIME" "standalone" "$env_file"
+  set_env_kv "NEXUS_MANAGED" "false" "$env_file"
+  set_env_kv "NEXUS_TENANT_ID" "" "$env_file"
+  set_env_kv "NEXUS_BOOTSTRAP_INTROSPECTION_URL" "" "$env_file"
+  set_env_kv "NEXUS_CONTROL_CALLBACK_URL" "" "$env_file"
+  set_env_kv "NEXUS_CONTROL_CALLBACK_KEY_FILE" "" "$env_file"
+  set_env_kv "NEXUS_TENANT_EVENTS_ENABLED" "false" "$env_file"
+  set_env_kv "NEXUS_TENANT_EVENTS_KEY_FILE" "" "$env_file"
+  set_env_kv "NEXUS_TENANT_EVENTS_CONSUMER" "" "$env_file"
+  set_env_kv "NEXUS_TENANT_EVENTS_REDIS_URL" "" "$env_file"
+  set_env_kv "NEXUS_TENANT_EVENTS_REDIS_USERNAME" "" "$env_file"
+  set_env_kv "NEXUS_TENANT_EVENTS_REDIS_PASSWORD" "" "$env_file" "secret"
 }

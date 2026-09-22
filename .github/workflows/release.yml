@@ -1,0 +1,53 @@
+name: Publish canonical Nexus release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22.x'
+      - name: Test
+        run: |
+          bash tests/bootstrap_contract_test.sh
+          go test ./...
+      - name: Verify matching component releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          for entry in \
+            'Nexus-AMS:nexus-core.tar.gz' \
+            'Nexus-AMS-Subs:nexus-subs.tar.gz' \
+            'Nexus-AMS-Discord:nexus-discord.tar.gz'; do
+            repository=${entry%%:*}
+            asset=${entry#*:}
+            release=$(gh api "repos/Yosodog/${repository}/releases/tags/${RELEASE_TAG}")
+            jq -e '.draft == false and .prerelease == false' <<<"${release}" >/dev/null
+            jq -e --arg asset "${asset}" '.assets | any(.name == $asset)' <<<"${release}" >/dev/null
+          done
+      - name: Build static CLI
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X github.com/Yosodog/Nexus-Setup/internal/updater.BuildVersion=${RELEASE_TAG}" \
+            -o dist/nexus-linux-amd64 ./cmd/nexus
+      - name: Publish canonical release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "${RELEASE_TAG}" dist/nexus-linux-amd64 --verify-tag --generate-notes --title "Nexus ${RELEASE_TAG}"

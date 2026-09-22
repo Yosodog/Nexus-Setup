@@ -1,0 +1,15 @@
+[Unit]
+Description=Nexus privileged updater control socket
+Documentation=https://github.com/Yosodog/Nexus-Setup
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenStream=/run/nexus-updater/control.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=nexus-updater-control
+DirectoryMode=0750
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -646,6 +646,9 @@ func promptInstallOptions() (updater.InstallOptions, error) {
 		if options.PWAPIKey, err = readSecret("Politics & War API key: "); err != nil {
 			return options, err
 		}
+		if options.PWMutationKey, err = readSecret("Politics & War mutation key: "); err != nil {
+			return options, err
+		}
 	}
 	if profile == updater.ProfileAppWebSubsRemoteDB || profile == updater.ProfileWebOnly {
 		if options.DatabaseHost, err = readLine("Remote database host: "); err != nil {

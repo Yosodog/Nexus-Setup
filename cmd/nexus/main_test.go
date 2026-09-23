@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"strings"
 	"testing"
 )
@@ -34,5 +35,21 @@ func TestCommandHelpExplainsComponentRestrictions(t *testing.T) {
 func TestCommandHelpRejectsUnknownTopics(t *testing.T) {
 	if _, err := commandHelp("anything"); err == nil {
 		t.Fatal("expected an unknown help topic to fail")
+	}
+}
+
+func TestInstallPromptReadsPWMutationKey(t *testing.T) {
+	previous := stdinReader
+	defer func() { stdinReader = previous }()
+	stdinReader = bufio.NewReader(strings.NewReader(strings.Join([]string{
+		"1", "nexus.example.com", "admin@example.com", "long-password", "123", "456", "api-key", "mutation-key",
+	}, "\n") + "\n"))
+
+	options, err := promptInstallOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.PWAPIKey != "api-key" || options.PWMutationKey != "mutation-key" {
+		t.Fatal("Politics & War keys were not collected separately")
 	}
 }

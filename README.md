@@ -3,6 +3,17 @@
 Nexus Setup provides one command for installing and maintaining self-hosted
 Nexus AMS on supported systemd hosts.
 
+## Guides
+
+- [Install Nexus step by step](docs/getting-started.md) — prepare a server,
+  run the installer, and verify the result.
+- [Choose an installation profile](docs/installation-profiles.md) — all five
+  layouts, including remote database and Subs-only hosts.
+- [Operate Nexus](docs/operations.md) — updates, rollback, components, and
+  cleanup.
+- [Troubleshoot](docs/troubleshooting.md) — installation failures, service
+  health, and interrupted operations.
+
 ## Supported hosts
 
 - Ubuntu 22.04, 24.04, or 26.04 LTS on amd64
@@ -23,6 +34,9 @@ certificate after Core starts, so DNS and port 80 must already work.
 
 ## Install
 
+Follow the [step-by-step installation guide](docs/getting-started.md) for
+prerequisites, every prompt, and verification. The short path is:
+
 ```bash
 git clone https://github.com/Yosodog/Nexus-Setup.git
 cd Nexus-Setup
@@ -30,34 +44,15 @@ sudo ./bootstrap.sh
 sudo nexus install
 ```
 
-The guided installer defaults to putting everything on one server. It asks
-only for the domain, administrator account, alliance ID, and Politics & War
-API key. Database and internal credentials, paths, service users, systemd
-units, queues, component URLs, and TLS email are handled automatically.
-
-Advanced profiles support an existing remote database, web-only, database-only,
-and Subs-only hosts. The installer uses published release artifacts instead of
-Git checkouts and never regenerates configuration during an update.
-
-For a database-only host, the installer additionally asks for that server's
-private IPv4 address and the application server's private IPv4 address. It
-binds MySQL/MariaDB to the selected local address, grants the generated
-`nexus_app` account only to the named application address, and writes the
-connection details to a root-only file under `/etc/nexus/credentials/`. Copy
-those details securely to the application host. Permit port 3306 only from
-that application address in your host/network firewall; do not publish a
-database-only host directly to the internet. This advanced split profile does
-not include a GUI on the database host.
-
-For the default profile, the prompts are the domain, administrator email and
-password, administrator nation ID, alliance ID, and Politics & War API key.
-Discord is optional: create the Discord application yourself, then use
-`nexus component install discord` or the Admin Software page to supply its bot
-token, application ID, and guild ID. Nexus registers the guild slash commands
-after a successful managed install or update; you must still invite the bot in
-the Discord Developer Portal.
+The default profile installs Core and Subs on one server with a local database.
+See [installation profiles](docs/installation-profiles.md) for other layouts.
+The installer uses published release artifacts instead of Git checkouts and
+does not regenerate configuration during updates.
 
 ## Operate Nexus
+
+See the [operations guide](docs/operations.md) for the safe sequence for each
+command and the [troubleshooting guide](docs/troubleshooting.md) if one fails.
 
 ```text
 nexus status

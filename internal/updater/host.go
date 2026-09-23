@@ -39,6 +39,7 @@ type InstallOptions struct {
 	AdminNationID         string
 	AllianceID            string
 	PWAPIKey              string
+	PWMutationKey         string
 	DatabaseHost          string
 	DatabaseName          string
 	DatabaseUser          string
@@ -477,6 +478,9 @@ func validateInstallOptions(options InstallOptions) error {
 	if !emailPattern.MatchString(options.AdminEmail) || len(options.AdminPassword) < 12 || !digitsPattern.MatchString(options.AdminNationID) || !digitsPattern.MatchString(options.AllianceID) || options.PWAPIKey == "" {
 		return errors.New("administrator, alliance, or Politics & War configuration is invalid")
 	}
+	if options.PWMutationKey == "" {
+		return errors.New("Politics & War mutation key is required")
+	}
 	if options.Profile == ProfileAppWebSubsRemoteDB || options.Profile == ProfileWebOnly {
 		if options.DatabaseHost == "" || options.DatabaseName == "" || options.DatabaseUser == "" || options.DatabasePassword == "" {
 			return errors.New("remote database configuration is incomplete")
@@ -739,7 +743,7 @@ func prepareInstallConfiguration(paths Paths, options InstallOptions) (map[strin
 		"APP_NAME": "Nexus", "APP_ENV": "production", "APP_KEY": appKey, "APP_DEBUG": "false", "APP_URL": "https://" + options.Domain,
 		"DB_CONNECTION": "mysql", "DB_HOST": databaseHost, "DB_PORT": "3306", "DB_DATABASE": databaseName, "DB_USERNAME": databaseUser, "DB_PASSWORD": databasePassword,
 		"CACHE_STORE": "database", "SESSION_DRIVER": "database", "QUEUE_CONNECTION": "database",
-		"PW_API_KEY": options.PWAPIKey, "PW_ALLIANCE_ID": options.AllianceID, "NEXUS_API_TOKEN": nexusToken, "DISCORD_BOT_KEY": discordToken,
+		"PW_API_KEY": options.PWAPIKey, "PW_API_MUTATION_KEY": options.PWMutationKey, "PW_ALLIANCE_ID": options.AllianceID, "NEXUS_API_TOKEN": nexusToken, "DISCORD_BOT_KEY": discordToken,
 	}
 	coreConfig := filepath.Join(paths.NexusConfigDir, string(ComponentCore))
 	if err := os.MkdirAll(coreConfig, 0750); err != nil {

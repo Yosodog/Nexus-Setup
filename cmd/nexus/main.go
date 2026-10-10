@@ -74,6 +74,9 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	if len(arguments) == 1 && arguments[0] == "channel" {
+		return printChannel(client, jsonOutput)
+	}
 	request, err := commandRequest(arguments)
 	if err != nil {
 		return err
@@ -91,6 +94,9 @@ func run(arguments []string) error {
 			if !updateAvailable {
 				return nil
 			}
+		}
+		if request.Operation == updater.OperationSetChannel && request.Channel == updater.ChannelBeta {
+			fmt.Println("The beta channel installs prereleases. They get less testing than stable releases.")
 		}
 		if request.Operation == updater.OperationCleanup {
 			status, statusErr := call(client, updater.OperationGetStatus, "", nil)
@@ -140,6 +146,7 @@ Commands:
   component enable <name>         Enable Subs or Discord
   component disable <name>        Disable Subs or Discord
   component restart <name>        Restart Core, Subs, or Discord
+  channel [stable|beta]           Show or change the release channel
   operation show <uuid> [--json]  Show durable operation progress
   version [--json]                Print the nexus CLI version
   help [command]                  Show help
@@ -147,7 +154,7 @@ Commands:
 Mutation commands accept --yes for intentional non-interactive use.
 `, nil
 	case "install":
-		return "Usage: nexus install [--yes]\n\nGuided installation or adoption of a standard legacy Nexus deployment.\n", nil
+		return "Usage: nexus install [--channel stable|beta] [--yes]\n\nGuided installation or adoption of a standard legacy Nexus deployment.\nThe channel defaults to stable; beta also installs prereleases.\n", nil
 	case "update":
 		return "Usage: nexus update [--check] [--yes]\n\nChecks each component's official GitHub releases on this host's channel and\ninstalls the newest releases that are compatible with each other.\n", nil
 	case "status":
@@ -168,6 +175,8 @@ Mutation commands accept --yes for intentional non-interactive use.
 `, nil
 	case "operation":
 		return "Usage: nexus operation show <operation-id> [--json]\n", nil
+	case "channel":
+		return "Usage: nexus channel [stable|beta]\n\nWithout an argument, prints the release channel. stable follows only stable\nreleases; beta also follows prereleases such as v1.2.0-beta.1. Switching back\nto stable never downgrades: installed prereleases stay until stable releases\novertake them. The change applies to the next nexus update.\n", nil
 	case "version":
 		return "Usage: nexus version [--json]\n", nil
 	default:
@@ -270,6 +279,17 @@ func commandRequest(arguments []string) (updater.Request, error) {
 		return componentRequest(arguments[1:])
 	case "operation":
 		return operationRequest(arguments[1:])
+	case "channel":
+		if len(arguments) != 2 {
+			return updater.Request{}, errors.New("usage: nexus channel [stable|beta]")
+		}
+		channel := updater.Channel(arguments[1])
+		if channel != updater.ChannelStable && channel != updater.ChannelBeta {
+			return updater.Request{}, errors.New("channel must be stable or beta")
+		}
+		request, err := requestFor(updater.OperationSetChannel)
+		request.Channel = channel
+		return request, err
 	default:
 		return updater.Request{}, fmt.Errorf("unknown command %q", arguments[0])
 	}
@@ -345,7 +365,8 @@ func updaterOperationMutates(operation updater.Operation) bool {
 	switch operation {
 	case updater.OperationUpdate, updater.OperationRollback, updater.OperationCleanup,
 		updater.OperationInstallComponent, updater.OperationEnableComponent,
-		updater.OperationDisableComponent, updater.OperationRestartComponent:
+		updater.OperationDisableComponent, updater.OperationRestartComponent,
+		updater.OperationSetChannel:
 		return true
 	default:
 		return false
@@ -418,6 +439,24 @@ func printUpdateSummary(response updater.Response) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func printChannel(client updater.Client, jsonOutput bool) error {
+	response, err := call(client, updater.OperationGetStatus, "", nil)
+	if err != nil {
+		return err
+	}
+	var data updater.StatusData
+	if err := updater.DecodeResponseData(response, &data); err != nil {
+		return err
+	}
+	if jsonOutput {
+		encoded, _ := json.Marshal(map[string]string{"channel": data.Channel})
+		fmt.Println(string(encoded))
+		return nil
+	}
+	fmt.Println(data.Channel)
+	return nil
 }
 
 func printCleanupSummary(response updater.Response) error {
@@ -580,6 +619,7 @@ func systemdListener() (net.Listener, bool, error) {
 func runInstall(arguments []string) error {
 	flags := flag.NewFlagSet("install", flag.ContinueOnError)
 	yes := flags.Bool("yes", false, "accept the installation summary")
+	channel := flags.String("channel", string(updater.ChannelStable), "release channel: stable or beta")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -605,12 +645,16 @@ func runInstall(arguments []string) error {
 		}
 		return updater.AdoptLegacyInstallation(context.Background())
 	}
+	if *channel != string(updater.ChannelStable) && *channel != string(updater.ChannelBeta) {
+		return errors.New("--channel must be stable or beta")
+	}
 	options, err := promptInstallOptions()
 	if err != nil {
 		return err
 	}
+	options.Channel = updater.Channel(*channel)
 	if !*yes {
-		fmt.Fprintf(os.Stderr, "\nInstall profile: %s\nDomain: %s\n", options.Profile, options.Domain)
+		fmt.Fprintf(os.Stderr, "\nInstall profile: %s\nRelease channel: %s\nDomain: %s\n", options.Profile, options.Channel, options.Domain)
 		confirmed, err := confirm("Install Nexus now? [y/N]: ")
 		if err != nil || !confirmed {
 			return err

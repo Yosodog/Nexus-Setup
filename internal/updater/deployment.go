@@ -55,6 +55,8 @@ func (engine DeploymentEngine) Run(ctx context.Context, operation OperationState
 		return engine.setComponentEnabled(ctx, operation, false)
 	case OperationRestartComponent:
 		return engine.restartComponent(ctx, operation.Component)
+	case OperationSetChannel:
+		return engine.setChannel(operation.Channel)
 	default:
 		return fmt.Errorf("unsupported worker operation %q", operation.Operation)
 	}
@@ -1360,6 +1362,21 @@ func (engine DeploymentEngine) setComponentEnabled(ctx context.Context, operatio
 		return err
 	}
 	return nil
+}
+
+// setChannel changes which releases future updates consider. It never
+// installs anything; switching from beta to stable keeps the installed
+// prereleases until stable releases overtake them.
+func (engine DeploymentEngine) setChannel(channel Channel) error {
+	if !validChannel(channel) {
+		return errors.New("channel must be stable or beta")
+	}
+	state, err := LoadInstallation(engine.Config.Paths)
+	if err != nil {
+		return err
+	}
+	state.Channel = channel
+	return SaveInstallation(engine.Config.Paths, state)
 }
 
 func (engine DeploymentEngine) restartComponent(ctx context.Context, component Component) error {

@@ -33,6 +33,7 @@ type Platform struct {
 
 type InstallOptions struct {
 	Profile               Profile
+	Channel               Channel
 	Domain                string
 	AdminEmail            string
 	AdminPassword         string
@@ -339,7 +340,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 	for _, component := range components {
 		planned[component] = ""
 	}
-	plan, err := planForComponents(ctx, releases, ChannelStable, planned)
+	plan, err := planForComponents(ctx, releases, options.Channel, planned)
 	if err != nil {
 		return err
 	}
@@ -418,7 +419,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 			return err
 		}
 	}
-	state := InstallationState{Profile: options.Profile, Channel: ChannelStable, Components: map[Component]InstalledComponent{}}
+	state := InstallationState{Profile: options.Profile, Channel: options.Channel, Components: map[Component]InstalledComponent{}}
 	for _, component := range []Component{ComponentCore, ComponentSubs, ComponentDiscord} {
 		installed := containsComponent(components, component)
 		state.Components[component] = InstalledComponent{Installed: installed, Enabled: installed, CurrentRelease: versions[component]}
@@ -463,6 +464,9 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 func validateInstallOptions(options InstallOptions) error {
 	if !validProfile(options.Profile) {
 		return errors.New("installation profile is invalid")
+	}
+	if !validChannel(options.Channel) {
+		return errors.New("release channel must be stable or beta")
 	}
 	if options.Profile == ProfileDatabaseOnly {
 		if !privateIPv4(options.DatabaseListenAddress) || !privateIPv4(options.ApplicationHost) || options.DatabaseListenAddress == options.ApplicationHost {

@@ -354,7 +354,7 @@ func (server *Server) statusData() StatusData {
 		if state.Profile == ProfileDatabaseOnly {
 			data.Host.Capabilities = []string{"doctor"}
 		} else {
-			data.Host.Capabilities = []string{"update", "rollback", "cleanup", "components"}
+			data.Host.Capabilities = []string{"update", "rollback", "cleanup", "components", "channel"}
 		}
 	}
 	data.Components = server.componentData()

@@ -7,7 +7,7 @@ length followed by at most 64 KiB of UTF-8 JSON.
 The socket accepts only these operations:
 
 - `GetStatus`, `CheckUpdates`, `Doctor`, `GetOperation`, `ListComponents`
-- `Update`, `Rollback`, `Cleanup`
+- `Update`, `Rollback`, `Cleanup`, `SetChannel`
 - `InstallComponent`, `EnableComponent`, `DisableComponent`, `RestartComponent`
 
 Components are exactly `nexus-core`, `nexus-subs`, and `nexus-discord`.
@@ -30,7 +30,8 @@ installation accepts configuration, limited to `bot_token`, `client_id`, and
 `guild_id`. The coordinator moves those write-only values into a root-owned
 runtime file and does not write them into operation state.
 
-`Rollback` optionally accepts a `component_id`. Without one it restores the
+`SetChannel` requires `channel`, which is `stable` or `beta`; no other
+operation accepts it. `Rollback` optionally accepts a `component_id`. Without one it restores the
 previous release of every component the last update changed.
 
 Unknown fields, operations, components, paths, URLs, commands, service names,

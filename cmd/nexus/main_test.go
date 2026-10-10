@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"strings"
 	"testing"
+
+	"github.com/Yosodog/Nexus-Setup/internal/updater"
 )
 
 func TestCommandHelpListsPublicCommands(t *testing.T) {
@@ -12,7 +14,7 @@ func TestCommandHelpListsPublicCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, command := range []string{"install", "update", "status", "doctor", "rollback", "cleanup", "component", "operation", "version"} {
+	for _, command := range []string{"install", "update", "status", "doctor", "rollback", "cleanup", "component", "channel", "operation", "version"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("expected help to list %q", command)
 		}
@@ -51,5 +53,31 @@ func TestInstallPromptReadsPWMutationKey(t *testing.T) {
 	}
 	if options.PWAPIKey != "api-key" || options.PWMutationKey != "mutation-key" {
 		t.Fatal("Politics & War keys were not collected separately")
+	}
+}
+
+func TestChannelCommandBuildsSetChannelRequest(t *testing.T) {
+	request, err := commandRequest([]string{"channel", "beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Operation != updater.OperationSetChannel || request.Channel != updater.ChannelBeta || request.OperationID == "" {
+		t.Fatalf("unexpected channel request: %+v", request)
+	}
+	if _, err := commandRequest([]string{"channel", "nightly"}); err == nil {
+		t.Fatal("unknown channel was accepted")
+	}
+}
+
+func TestRollbackCommandAcceptsComponent(t *testing.T) {
+	request, err := commandRequest([]string{"rollback", "subs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Operation != updater.OperationRollback || request.Component != updater.ComponentSubs {
+		t.Fatalf("unexpected rollback request: %+v", request)
+	}
+	if _, err := commandRequest([]string{"rollback", "web"}); err == nil {
+		t.Fatal("unknown component rollback was accepted")
 	}
 }

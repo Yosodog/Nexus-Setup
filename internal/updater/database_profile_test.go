@@ -13,7 +13,7 @@ func TestDatabaseOnlyRequiresPrivateCrossHostAddresses(t *testing.T) {
 		}
 	}
 	if err := validateInstallOptions(InstallOptions{
-		Profile: ProfileDatabaseOnly, DatabaseListenAddress: "10.0.0.4", ApplicationHost: "10.0.0.8",
+		Profile: ProfileDatabaseOnly, Channel: ChannelStable, DatabaseListenAddress: "10.0.0.4", ApplicationHost: "10.0.0.8",
 	}); err != nil {
 		t.Fatalf("private database-only profile was rejected: %v", err)
 	}
@@ -22,7 +22,7 @@ func TestDatabaseOnlyRequiresPrivateCrossHostAddresses(t *testing.T) {
 func TestCoreProfilesRequirePWMutationKey(t *testing.T) {
 	for _, profile := range []Profile{ProfileFull, ProfileAppWebSubsRemoteDB, ProfileWebOnly} {
 		options := InstallOptions{
-			Profile: profile, Domain: "nexus.example.com", AdminEmail: "admin@example.com",
+			Profile: profile, Channel: ChannelBeta, Domain: "nexus.example.com", AdminEmail: "admin@example.com",
 			AdminPassword: "long-password", AdminNationID: "123", AllianceID: "456", PWAPIKey: "api-key",
 			DatabaseHost: "10.0.0.4", DatabaseName: "nexus", DatabaseUser: "nexus_app", DatabasePassword: "db-secret",
 		}
@@ -32,6 +32,16 @@ func TestCoreProfilesRequirePWMutationKey(t *testing.T) {
 		options.PWMutationKey = "mutation-key"
 		if err := validateInstallOptions(options); err != nil {
 			t.Fatalf("%s rejected with both keys: %v", profile, err)
+		}
+	}
+}
+
+func TestInstallRequiresKnownChannel(t *testing.T) {
+	options := InstallOptions{Profile: ProfileDatabaseOnly, DatabaseListenAddress: "10.0.0.4", ApplicationHost: "10.0.0.8"}
+	for _, channel := range []Channel{"", "nightly"} {
+		options.Channel = channel
+		if err := validateInstallOptions(options); err == nil {
+			t.Fatalf("channel %q was accepted", channel)
 		}
 	}
 }

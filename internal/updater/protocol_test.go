@@ -85,3 +85,34 @@ func TestFrameSizeLimit(t *testing.T) {
 		t.Fatal("oversized length prefix was accepted")
 	}
 }
+
+func TestSetChannelRequiresKnownChannel(t *testing.T) {
+	request := testRequest(OperationSetChannel)
+	if err := request.Validate(); err == nil {
+		t.Fatal("channel change without a channel was accepted")
+	}
+	request.Channel = "nightly"
+	if err := request.Validate(); err == nil {
+		t.Fatal("unknown channel was accepted")
+	}
+	request.Channel = ChannelBeta
+	if err := request.Validate(); err != nil {
+		t.Fatalf("beta channel was rejected: %v", err)
+	}
+	update := testRequest(OperationUpdate)
+	update.Channel = ChannelBeta
+	if err := update.Validate(); err == nil {
+		t.Fatal("channel was accepted on an unrelated operation")
+	}
+}
+
+func TestRollbackAcceptsOptionalComponent(t *testing.T) {
+	request := testRequest(OperationRollback)
+	if err := request.Validate(); err != nil {
+		t.Fatalf("rollback without a component was rejected: %v", err)
+	}
+	request.Component = ComponentSubs
+	if err := request.Validate(); err != nil {
+		t.Fatalf("component rollback was rejected: %v", err)
+	}
+}

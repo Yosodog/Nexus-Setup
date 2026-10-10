@@ -28,6 +28,7 @@ type Request struct {
 	Component     Component         `json:"-"`
 	OperationID   string            `json:"-"`
 	Source        string            `json:"-"`
+	Channel       Channel           `json:"-"`
 	Configuration map[string]string `json:"-"`
 }
 
@@ -58,6 +59,7 @@ type requestPayload struct {
 	Component     Component         `json:"component_id,omitempty"`
 	OperationID   string            `json:"operation_id,omitempty"`
 	Source        string            `json:"source,omitempty"`
+	Channel       Channel           `json:"channel,omitempty"`
 	Configuration map[string]string `json:"configuration,omitempty"`
 }
 
@@ -66,6 +68,7 @@ func (request Request) MarshalJSON() ([]byte, error) {
 		Component:     request.Component,
 		OperationID:   request.OperationID,
 		Source:        request.Source,
+		Channel:       request.Channel,
 		Configuration: request.Configuration,
 	}
 	payloadBytes, err := json.Marshal(payload)
@@ -109,6 +112,7 @@ func (request *Request) UnmarshalJSON(data []byte) error {
 	request.Component = payload.Component
 	request.OperationID = payload.OperationID
 	request.Source = payload.Source
+	request.Channel = payload.Channel
 	request.Configuration = payload.Configuration
 	return nil
 }
@@ -200,6 +204,12 @@ func (r Request) Validate() error {
 	if !componentOperation(r.Operation) && r.Operation != OperationRollback && r.Component != "" {
 		return errors.New("component is not accepted for this operation")
 	}
+	if r.Operation == OperationSetChannel && !validChannel(r.Channel) {
+		return errors.New("channel must be stable or beta")
+	}
+	if r.Operation != OperationSetChannel && r.Channel != "" {
+		return errors.New("channel is accepted only when setting the release channel")
+	}
 	if err := validateComponentConfiguration(r.Operation, r.Component, r.Configuration); err != nil {
 		return err
 	}
@@ -232,12 +242,14 @@ func (r Request) Fingerprint() string {
 		Component           Component
 		OperationID         string
 		Source              string
+		Channel             Channel
 		ConfigurationDigest string
 	}{
 		Operation:           r.Operation,
 		Component:           r.Component,
 		OperationID:         r.OperationID,
 		Source:              r.Source,
+		Channel:             r.Channel,
 		ConfigurationDigest: configurationDigest(r.Configuration),
 	})
 	digest := sha256.Sum256(b)

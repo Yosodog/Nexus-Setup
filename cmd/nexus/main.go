@@ -653,6 +653,9 @@ func runInstall(arguments []string) error {
 		return err
 	}
 	options.Channel = updater.Channel(*channel)
+	if err := runPreflight(options, *yes); err != nil {
+		return err
+	}
 	if !*yes {
 		fmt.Fprintf(os.Stderr, "\nInstall profile: %s\nRelease channel: %s\nDomain: %s\n", options.Profile, options.Channel, options.Domain)
 		confirmed, err := confirm("Install Nexus now? [y/N]: ")
@@ -661,6 +664,38 @@ func runInstall(arguments []string) error {
 		}
 	}
 	return updater.InstallFresh(context.Background(), options)
+}
+
+// runPreflight checks DNS and the Politics & War credentials before the
+// installer spends minutes installing packages.
+func runPreflight(options updater.InstallOptions, yes bool) error {
+	fmt.Fprintln(os.Stderr, "\nChecking the domain and Politics & War credentials...")
+	results := updater.PreflightInstall(context.Background(), options)
+	warnings := 0
+	for _, result := range results {
+		marker := "ok"
+		switch result.Severity {
+		case updater.PreflightWarning:
+			marker = "warning"
+			warnings++
+		case updater.PreflightFailed:
+			marker = "error"
+		}
+		fmt.Fprintf(os.Stderr, "  [%s] %s\n", marker, result.Message)
+	}
+	if updater.PreflightBlocked(results) {
+		return errors.New("fix the errors above and run sudo nexus install again; nothing was changed")
+	}
+	if warnings > 0 && !yes {
+		confirmed, err := confirm("Continue despite the warnings? [y/N]: ")
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			return errors.New("installation cancelled; nothing was changed")
+		}
+	}
+	return nil
 }
 
 func promptInstallOptions() (updater.InstallOptions, error) {

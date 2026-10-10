@@ -2,6 +2,7 @@ package updater
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -39,7 +40,7 @@ func testPreflightEnvironment(t *testing.T, pwResponse string, pwStatus int) pre
 	}
 }
 
-const pwMatchingResponse = `{"data":{"me":{"nation":{"id":"123","nation_name":"Yosodia"}},"alliances":{"data":[{"id":"456","name":"Test Alliance"}]},"nations":{"data":[{"id":123,"nation_name":"Yosodia","alliance_id":456}]}}}`
+const pwMatchingResponse = `{"data":{"me":{"nation":{"id":"123","nation_name":"Yosodia","alliance_id":456,"alliance":{"id":"456","name":"Test Alliance"}}}}}`
 
 func preflightOptions() InstallOptions {
 	return InstallOptions{Profile: ProfileFull, Channel: ChannelStable, Domain: "nexus.example.com", PWAPIKey: "good-key", AdminNationID: "123", AllianceID: "456"}
@@ -60,8 +61,8 @@ func TestPreflightPassesForMatchingDomainAndCredentials(t *testing.T) {
 			t.Fatalf("unexpected finding: %+v", result)
 		}
 	}
-	if len(results) != 4 {
-		t.Fatalf("expected domain, key, alliance, and nation checks: %+v", results)
+	if len(results) != 3 || !strings.Contains(results[2].Message, "Test Alliance") {
+		t.Fatalf("expected domain, key, and alliance checks: %+v", results)
 	}
 }
 
@@ -96,12 +97,29 @@ func TestPreflightRejectsBadAPIKey(t *testing.T) {
 	}
 }
 
-func TestPreflightChecksAllianceAndNation(t *testing.T) {
-	response := `{"data":{"me":{"nation":{"id":"123","nation_name":"Yosodia"}},"alliances":{"data":[]},"nations":{"data":[{"id":"123","nation_name":"Yosodia","alliance_id":"999"}]}}}`
+func TestPreflightWarnsWhenKeyBelongsElsewhere(t *testing.T) {
+	response := `{"data":{"me":{"nation":{"id":"777","nation_name":"Other","alliance_id":"999","alliance":{"id":"999","name":"Elsewhere"}}}}}`
 	results := testPreflightEnvironment(t, response, http.StatusOK).run(context.Background(), preflightOptions())
 	found := severities(results)
-	if found["alliance"] != PreflightFailed || found["administrator_nation"] != PreflightWarning {
+	if found["alliance"] != PreflightWarning || found["administrator_nation"] != PreflightWarning || PreflightBlocked(results) {
 		t.Fatalf("unexpected alliance and nation findings: %+v", results)
+	}
+}
+
+func TestPreflightSendsOnlyTheMeQuery(t *testing.T) {
+	var query string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		query = body["query"]
+		_, _ = io.WriteString(writer, pwMatchingResponse)
+	}))
+	defer server.Close()
+	environment := testPreflightEnvironment(t, pwMatchingResponse, http.StatusOK)
+	environment.pwEndpoint, environment.pwClient = server.URL, server.Client()
+	environment.checkPoliticsAndWar(context.Background(), "good-key", "123", "456")
+	if query != pwPreflightQuery || strings.Contains(query, "alliances(") || strings.Contains(query, "nations(") {
+		t.Fatalf("unexpected Politics & War query: %q", query)
 	}
 }
 
@@ -121,7 +139,7 @@ func TestPreflightSkipsDatabaseOnlyHosts(t *testing.T) {
 
 func TestPreflightSubsOnlyChecksOnlyTheKey(t *testing.T) {
 	options := InstallOptions{Profile: ProfileSubsOnly, PWAPIKey: "good-key"}
-	results := testPreflightEnvironment(t, `{"data":{"me":{"nation":{"id":"1","nation_name":"N"}}}}`, http.StatusOK).run(context.Background(), options)
+	results := testPreflightEnvironment(t, `{"data":{"me":{"nation":{"id":"1","nation_name":"N","alliance_id":"0","alliance":null}}}}`, http.StatusOK).run(context.Background(), options)
 	if len(results) != 1 || results[0].Severity != PreflightPassed || !strings.Contains(results[0].Message, "belongs to N") {
 		t.Fatalf("unexpected subs-only findings: %+v", results)
 	}

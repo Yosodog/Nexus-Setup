@@ -193,43 +193,28 @@ type pwPreflightResponse struct {
 			Nation *struct {
 				ID         pwID   `json:"id"`
 				NationName string `json:"nation_name"`
+				AllianceID pwID   `json:"alliance_id"`
+				Alliance   *struct {
+					ID   pwID   `json:"id"`
+					Name string `json:"name"`
+				} `json:"alliance"`
 			} `json:"nation"`
 		} `json:"me"`
-		Alliances *struct {
-			Data []struct {
-				ID   pwID   `json:"id"`
-				Name string `json:"name"`
-			} `json:"data"`
-		} `json:"alliances"`
-		Nations *struct {
-			Data []struct {
-				ID         pwID   `json:"id"`
-				NationName string `json:"nation_name"`
-				AllianceID pwID   `json:"alliance_id"`
-			} `json:"data"`
-		} `json:"nations"`
 	} `json:"data"`
 	Errors []struct {
 		Message string `json:"message"`
 	} `json:"errors"`
 }
 
+// pwPreflightQuery asks only about the key's own nation, so it needs no
+// permissions beyond a working API key.
+const pwPreflightQuery = "{ me { nation { id nation_name alliance_id alliance { id name } } } }"
+
+// checkPoliticsAndWar confirms the API key works and compares the nation that
+// owns it with the administrator nation and alliance from the installer.
 func (environment preflightEnvironment) checkPoliticsAndWar(ctx context.Context, apiKey, nationID, allianceID string) []PreflightResult {
 	const check = "politics_and_war"
-	query := "{ me { nation { id nation_name } }"
-	if allianceID != "" {
-		query += " alliances(id: [" + allianceID + "], first: 1) { data { id name } }"
-	}
-	if nationID != "" {
-		query += " nations(id: [" + nationID + "], first: 1) { data { id nation_name alliance_id } }"
-	}
-	query += " }"
-	for _, identifier := range []string{nationID, allianceID} {
-		if identifier != "" && ValidateNumericID(identifier) != nil {
-			return []PreflightResult{{Check: check, Severity: PreflightFailed, Message: "nation and alliance IDs must be numeric"}}
-		}
-	}
-	body, _ := json.Marshal(map[string]string{"query": query})
+	body, _ := json.Marshal(map[string]string{"query": pwPreflightQuery})
 	requestContext, cancel := context.WithTimeout(ctx, environment.pwRequestTimeout)
 	defer cancel()
 	endpoint := environment.pwEndpoint + "?" + url.Values{"api_key": {apiKey}}.Encode()
@@ -249,32 +234,24 @@ func (environment preflightEnvironment) checkPoliticsAndWar(ctx context.Context,
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || (decodeErr == nil && payload.Data.Me == nil && len(payload.Errors) > 0) {
 		return []PreflightResult{{Check: check, Severity: PreflightFailed, Message: "Politics & War rejected the API key. Copy it again from the Account page and rerun the installer."}}
 	}
-	if decodeErr != nil || response.StatusCode != http.StatusOK || payload.Data.Me == nil {
+	if decodeErr != nil || response.StatusCode != http.StatusOK || payload.Data.Me == nil || payload.Data.Me.Nation == nil {
 		return []PreflightResult{{Check: check, Severity: PreflightWarning, Message: "Politics & War returned an unexpected response (HTTP " + strconv.Itoa(response.StatusCode) + "), so the API key was not fully checked."}}
 	}
-	results := []PreflightResult{}
-	owner := "an unknown nation"
-	if payload.Data.Me.Nation != nil {
-		owner = payload.Data.Me.Nation.NationName
-	}
-	results = append(results, PreflightResult{Check: check, Severity: PreflightPassed, Message: "The Politics & War API key works (it belongs to " + owner + ")."})
-	allianceName := ""
+	nation := payload.Data.Me.Nation
+	results := []PreflightResult{{Check: check, Severity: PreflightPassed, Message: "The Politics & War API key works (it belongs to " + nation.NationName + ", nation " + string(nation.ID) + ")."}}
 	if allianceID != "" {
-		if payload.Data.Alliances == nil || len(payload.Data.Alliances.Data) == 0 {
-			results = append(results, PreflightResult{Check: "alliance", Severity: PreflightFailed, Message: "Politics & War has no alliance with ID " + allianceID + "."})
+		if string(nation.AllianceID) != allianceID {
+			results = append(results, PreflightResult{Check: "alliance", Severity: PreflightWarning, Message: "The API key's nation is not in alliance " + allianceID + ". Nexus reads alliance data with this key, so use a key from a member of that alliance."})
 		} else {
-			allianceName = payload.Data.Alliances.Data[0].Name
-			results = append(results, PreflightResult{Check: "alliance", Severity: PreflightPassed, Message: "Alliance " + allianceID + " is " + allianceName + "."})
+			name := "alliance " + allianceID
+			if nation.Alliance != nil && nation.Alliance.Name != "" {
+				name = nation.Alliance.Name
+			}
+			results = append(results, PreflightResult{Check: "alliance", Severity: PreflightPassed, Message: "Alliance " + allianceID + " is " + name + "."})
 		}
 	}
-	if nationID != "" {
-		if payload.Data.Nations == nil || len(payload.Data.Nations.Data) == 0 {
-			results = append(results, PreflightResult{Check: "administrator_nation", Severity: PreflightFailed, Message: "Politics & War has no nation with ID " + nationID + "."})
-		} else if nation := payload.Data.Nations.Data[0]; allianceID != "" && string(nation.AllianceID) != allianceID {
-			results = append(results, PreflightResult{Check: "administrator_nation", Severity: PreflightWarning, Message: "Administrator nation " + nation.NationName + " is not a member of alliance " + allianceID + "."})
-		} else {
-			results = append(results, PreflightResult{Check: "administrator_nation", Severity: PreflightPassed, Message: "Administrator nation " + nationID + " is " + nation.NationName + "."})
-		}
+	if nationID != "" && string(nation.ID) != nationID {
+		results = append(results, PreflightResult{Check: "administrator_nation", Severity: PreflightWarning, Message: "The API key belongs to nation " + string(nation.ID) + ", not administrator nation " + nationID + ". Check the nation ID if the key is your own."})
 	}
 	return results
 }

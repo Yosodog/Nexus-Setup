@@ -47,9 +47,12 @@ UUID, inspect it with `sudo nexus operation show <uuid>`.
   that the firewall or cloud security group allows inbound port 80. Some
   networks cannot reach their own public address; if you are sure DNS and the
   firewall are right, you can continue.
-- **Politics & War rejected the API key, or the alliance or nation does not
-  exist:** copy the key again from the Politics & War Account page and check
-  the IDs. Nothing was changed.
+- **Politics & War rejected the API key:** copy the key again from the
+  Politics & War Account page. Nothing was changed.
+- **Alliance or nation warning:** the API key belongs to a nation outside the
+  alliance you entered, or to a different nation than the administrator ID.
+  Nexus reads alliance data with this key, so use a key from an alliance
+  member and double-check the IDs.
 - **Package or release download fails:** verify outbound network access and
   available space, then inspect the command error. `sudo nexus doctor` reports
   free space for later updates; a fresh installation also checks space.

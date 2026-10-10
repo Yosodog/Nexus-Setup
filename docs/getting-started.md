@@ -59,8 +59,8 @@ the password is asked twice. If an answer is not valid, the prompt explains why
 and asks again.
 
 Before it changes anything, the installer checks that the domain resolves to
-this server and that Politics & War accepts the API key and recognizes the
-alliance and administrator nation. An error stops the installation with
+this server, that Politics & War accepts the API key, and that the key's nation
+is in the alliance and matches the administrator nation ID. An error stops the installation with
 nothing changed; a warning, such as a domain that points somewhere this server
 cannot reach, asks whether to continue. `--yes` skips only the warning and
 final confirmations; it does not skip the required questions.

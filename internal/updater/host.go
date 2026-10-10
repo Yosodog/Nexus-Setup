@@ -334,16 +334,20 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		return err
 	}
 	releases := NewGitHubReleaseClient()
-	available, err := releases.Releases(ctx, setupRepository, ChannelStable)
-	if err != nil || len(available) == 0 {
-		return errors.New("no stable Nexus GitHub release is available")
+	components := componentsForProfile(options.Profile)
+	planned := map[Component]string{}
+	for _, component := range components {
+		planned[component] = ""
 	}
-	release := BuildVersion
-	if _, err := ParseVersion(release); err != nil {
-		release = available[len(available)-1].Tag
+	plan, err := planForComponents(ctx, releases, ChannelStable, planned)
+	if err != nil {
+		return err
+	}
+	versions := map[Component]string{}
+	for _, change := range plan.Changes {
+		versions[change.Component] = change.To
 	}
 	engine := DeploymentEngine{Config: config, Releases: releases, Executor: OSCommandExecutor{}}
-	components := componentsForProfile(options.Profile)
 	activatedUnits := make([]string, 0, len(components)+1)
 	coreSiteConfigured := false
 	installCompleted := false
@@ -360,7 +364,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 				continue
 			}
 			target, readErr := os.Readlink(link)
-			releaseDirectory, releaseErr := componentReleaseDirectory(config.Paths, component, release)
+			releaseDirectory, releaseErr := componentReleaseDirectory(config.Paths, component, versions[component])
 			if readErr == nil && releaseErr == nil && filepath.Clean(target) == filepath.Clean(releaseDirectory) {
 				_ = os.Remove(link)
 			}
@@ -374,7 +378,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		_ = updateInstalledProfile(config.Paths, config.CurrentProfile)
 	}()
 	for _, component := range components {
-		if err := engine.stageComponent(ctx, "install", component, release); err != nil {
+		if err := engine.stageComponent(ctx, "install", plan.Manifests[component]); err != nil {
 			return err
 		}
 	}
@@ -388,7 +392,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		return err
 	}
 	if containsComponent(components, ComponentCore) {
-		if err := engine.prepareCoreRelease(release); err != nil {
+		if err := engine.prepareCoreRelease(versions[ComponentCore]); err != nil {
 			return err
 		}
 		if err := configurePHPFPM(ctx, config.Paths); err != nil {
@@ -398,29 +402,29 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 			return err
 		}
 		coreSiteConfigured = true
-		if err := engine.runArtisan(ctx, release, "migrate", "--force"); err != nil {
+		if err := engine.runArtisan(ctx, versions[ComponentCore], "migrate", "--force"); err != nil {
 			return err
 		}
-		if err := provisionAdministrator(ctx, engine, release, options); err != nil {
+		if err := provisionAdministrator(ctx, engine, versions[ComponentCore], options); err != nil {
 			return err
 		}
 	}
 	if containsComponent(components, ComponentSubs) {
 		if options.Profile == ProfileSubsOnly {
-			if err := engine.writeStandaloneSubsConfiguration(release, options); err != nil {
+			if err := engine.writeStandaloneSubsConfiguration(versions[ComponentSubs], options); err != nil {
 				return err
 			}
-		} else if err := engine.writeComponentConfiguration(ComponentSubs, release, nil); err != nil {
+		} else if err := engine.writeComponentConfiguration(ComponentSubs, versions[ComponentSubs], nil); err != nil {
 			return err
 		}
 	}
-	state := InstallationState{Version: 1, Profile: options.Profile, CurrentRelease: release, Components: map[Component]InstalledComponent{}}
+	state := InstallationState{Profile: options.Profile, Channel: ChannelStable, Components: map[Component]InstalledComponent{}}
 	for _, component := range []Component{ComponentCore, ComponentSubs, ComponentDiscord} {
 		installed := containsComponent(components, component)
-		state.Components[component] = InstalledComponent{Installed: installed, Enabled: installed, CurrentRelease: conditionalRelease(installed, release)}
+		state.Components[component] = InstalledComponent{Installed: installed, Enabled: installed, CurrentRelease: versions[component]}
 	}
 	for _, component := range components {
-		if err := atomicSwitchRelease(config.Paths, component, release); err != nil {
+		if err := atomicSwitchRelease(config.Paths, component, versions[component]); err != nil {
 			return err
 		}
 	}
@@ -437,7 +441,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		}
 		activatedUnits = append(activatedUnits, "nexus-scheduler.timer")
 	}
-	if err := engine.healthCheck(ctx, components, release); err != nil {
+	if err := engine.healthCheck(ctx, components, versions); err != nil {
 		return err
 	}
 	if containsComponent(components, ComponentCore) {
@@ -452,7 +456,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		return err
 	}
 	installCompleted = true
-	fmt.Printf("Nexus %s installed successfully.\n", release)
+	fmt.Printf("Nexus installed successfully (%s).\n", describeVersions(versions))
 	return nil
 }
 
@@ -658,11 +662,15 @@ func containsComponent(components []Component, wanted Component) bool {
 	return false
 }
 
-func conditionalRelease(installed bool, release string) string {
-	if installed {
-		return release
+// describeVersions renders component releases as "nexus-core v1.2.0, ...".
+func describeVersions(versions map[Component]string) string {
+	parts := make([]string, 0, len(versions))
+	for _, component := range planOrder {
+		if release := versions[component]; release != "" {
+			parts = append(parts, string(component)+" "+release)
+		}
 	}
-	return ""
+	return strings.Join(parts, ", ")
 }
 
 func prepareInstallConfiguration(paths Paths, options InstallOptions) (map[string]string, error) {

@@ -27,6 +27,9 @@ const (
 	coreAsset         = "nexus-core.tar.gz"
 	subsAsset         = "nexus-subs.tar.gz"
 	discordAsset      = "nexus-discord.tar.gz"
+	manifestAsset     = "nexus-release.json"
+	setupChecksum     = "nexus-linux-amd64.sha256"
+	maxManifestBytes  = 16 * 1024
 	maxReleasePages   = 5
 	maxReleaseBody    = 2 * 1024 * 1024
 )
@@ -204,6 +207,7 @@ type ReleaseInfo struct {
 
 type ReleaseProvider interface {
 	Releases(context.Context, string, Channel) ([]ReleaseInfo, error)
+	Manifest(context.Context, Component, string) (ReleaseManifest, error)
 	Download(context.Context, string, string, string, string, int64, func(int64, int64)) error
 }
 
@@ -319,63 +323,17 @@ func normalizeReleaseNotes(notes string) string {
 	return notes
 }
 
-func UpdatesAfter(releases []ReleaseInfo, installed string) ([]ReleaseInfo, error) {
-	installedVersion, err := ParseVersion(installed)
-	if err != nil {
-		return nil, err
-	}
-	updates := make([]ReleaseInfo, 0)
-	for _, release := range releases {
-		version, parseErr := ParseVersion(release.Tag)
-		if parseErr != nil {
-			continue
-		}
-		if version.Compare(installedVersion) > 0 {
-			updates = append(updates, release)
-		}
-	}
-	sort.Slice(updates, func(left, right int) bool {
-		leftVersion, _ := ParseVersion(updates[left].Tag)
-		rightVersion, _ := ParseVersion(updates[right].Tag)
-		return leftVersion.Compare(rightVersion) < 0
-	})
-	previous := installedVersion
-	for _, release := range updates {
-		version, _ := ParseVersion(release.Tag)
-		if !isImmediateSuccessor(previous, version) {
-			return nil, fmt.Errorf("required intermediate release before %s is unavailable", release.Tag)
-		}
-		previous = version
-	}
-	return updates, nil
-}
-
-func isImmediateSuccessor(previous, next Version) bool {
-	if next.Major == previous.Major && next.Minor == previous.Minor {
-		return next.Patch == previous.Patch+1
-	}
-	if next.Major == previous.Major && next.Minor == previous.Minor+1 {
-		return next.Patch == 0
-	}
-	return next.Major == previous.Major+1 && next.Minor == 0 && next.Patch == 0
-}
-
-func (client GitHubReleaseClient) Download(ctx context.Context, repository, tag, asset, destination string, maxBytes int64, progress func(int64, int64)) error {
+func (client GitHubReleaseClient) openAsset(ctx context.Context, repository, tag, asset string) (*http.Response, error) {
 	if !validRepositoryAsset(repository, asset) {
-		return errors.New("unsupported release asset")
+		return nil, errors.New("unsupported release asset")
 	}
 	if _, err := ParseVersion(tag); err != nil {
-		return err
-	}
-	if !filepath.IsAbs(destination) || maxBytes <= 0 {
-		return errors.New("download destination or size limit is invalid")
+		return nil, err
 	}
 	endpoint := "https://github.com/Yosodog/" + repository + "/releases/download/" + url.PathEscape(tag) + "/" + asset
-	downloadContext, cancel := context.WithTimeout(ctx, 90*time.Minute)
-	defer cancel()
-	request, err := http.NewRequestWithContext(downloadContext, http.MethodGet, endpoint, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request.Header.Set("User-Agent", "nexus-updater")
 	httpClient := client.Client
@@ -384,12 +342,66 @@ func (client GitHubReleaseClient) Download(ctx context.Context, repository, tag,
 	}
 	response, err := httpClient.Do(request)
 	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		return nil, fmt.Errorf("GitHub asset %s for %s %s returned status %d", asset, repository, tag, response.StatusCode)
+	}
+	return response, nil
+}
+
+func (client GitHubReleaseClient) fetchSmallAsset(ctx context.Context, repository, tag, asset string, maxBytes int64) ([]byte, error) {
+	requestContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	response, err := client.openAsset(requestContext, repository, tag, asset)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("GitHub asset %s exceeds its size limit", asset)
+	}
+	return data, nil
+}
+
+// Manifest downloads and validates the compatibility manifest published next
+// to a component release artifact.
+func (client GitHubReleaseClient) Manifest(ctx context.Context, component Component, tag string) (ReleaseManifest, error) {
+	repository, _, err := componentReleaseAsset(component)
+	if err != nil {
+		return ReleaseManifest{}, err
+	}
+	data, err := client.fetchSmallAsset(ctx, repository, tag, manifestAsset, maxManifestBytes)
+	if err != nil {
+		return ReleaseManifest{}, err
+	}
+	manifest, err := decodeReleaseManifest(data)
+	if err != nil {
+		return ReleaseManifest{}, err
+	}
+	if err := manifest.validate(component, tag, true); err != nil {
+		return ReleaseManifest{}, err
+	}
+	return manifest, nil
+}
+
+func (client GitHubReleaseClient) Download(ctx context.Context, repository, tag, asset, destination string, maxBytes int64, progress func(int64, int64)) error {
+	if !filepath.IsAbs(destination) || maxBytes <= 0 {
+		return errors.New("download destination or size limit is invalid")
+	}
+	downloadContext, cancel := context.WithTimeout(ctx, 90*time.Minute)
+	defer cancel()
+	response, err := client.openAsset(downloadContext, repository, tag, asset)
+	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub asset request failed with status %d", response.StatusCode)
-	}
 	if response.ContentLength > maxBytes {
 		return errors.New("release asset exceeds the download limit")
 	}
@@ -451,6 +463,12 @@ func validRepository(repository string) bool {
 }
 
 func validRepositoryAsset(repository, asset string) bool {
+	if asset == manifestAsset {
+		return repository == coreRepository || repository == subsRepository || repository == discordRepository
+	}
+	if asset == setupChecksum {
+		return repository == setupRepository
+	}
 	pairs := map[string]string{
 		setupRepository:   setupAsset,
 		coreRepository:    coreAsset,
@@ -460,29 +478,131 @@ func validRepositoryAsset(repository, asset string) bool {
 	return pairs[repository] == asset
 }
 
-type ArtifactIdentity struct {
-	SchemaVersion int       `json:"schema_version"`
-	Component     Component `json:"component"`
-	Release       string    `json:"release"`
+// RequirementUpdater names the nexus updater in a manifest's requirements.
+const RequirementUpdater = "nexus-updater"
+
+// ReleaseManifest identifies a component artifact and the minimum versions of
+// the other Nexus pieces it works with. The copy published as a release asset
+// also carries the artifact digest; the copy inside the artifact cannot.
+type ReleaseManifest struct {
+	SchemaVersion  int               `json:"schema_version"`
+	Component      Component         `json:"component"`
+	Release        string            `json:"release"`
+	Requires       map[string]string `json:"requires,omitempty"`
+	ArtifactSHA256 string            `json:"artifact_sha256,omitempty"`
 }
 
-func ValidateArtifactIdentity(directory string, component Component, release string) error {
-	path := filepath.Join(directory, "nexus-release.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return errors.New("artifact identity file is missing")
-	}
-	if len(data) > 4096 {
-		return errors.New("artifact identity file is too large")
+func decodeReleaseManifest(data []byte) (ReleaseManifest, error) {
+	if len(data) == 0 || len(data) > maxManifestBytes {
+		return ReleaseManifest{}, errors.New("release manifest has an invalid size")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	var identity ArtifactIdentity
-	if err := decoder.Decode(&identity); err != nil {
-		return errors.New("artifact identity file is invalid")
+	var manifest ReleaseManifest
+	if err := decoder.Decode(&manifest); err != nil {
+		return ReleaseManifest{}, errors.New("release manifest is invalid")
 	}
-	if identity.SchemaVersion != 1 || identity.Component != component || identity.Release != release {
-		return errors.New("artifact identity does not match the requested release")
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return ReleaseManifest{}, errors.New("release manifest contains trailing data")
+	}
+	return manifest, nil
+}
+
+func (manifest ReleaseManifest) validate(component Component, release string, published bool) error {
+	if manifest.SchemaVersion != 2 || manifest.Component != component || manifest.Release != release {
+		return errors.New("release manifest does not match the requested release")
+	}
+	if len(manifest.Requires) > 4 {
+		return errors.New("release manifest has too many requirements")
+	}
+	for name, minimum := range manifest.Requires {
+		if name == string(component) || (name != RequirementUpdater && !validComponent(Component(name))) {
+			return fmt.Errorf("release manifest has an unsupported requirement %q", name)
+		}
+		if _, err := ParseVersion(minimum); err != nil {
+			return fmt.Errorf("release manifest requirement %q is invalid", name)
+		}
+	}
+	if published {
+		if len(manifest.ArtifactSHA256) != 64 || strings.Trim(manifest.ArtifactSHA256, "0123456789abcdef") != "" {
+			return errors.New("release manifest artifact digest is invalid")
+		}
+	} else if manifest.ArtifactSHA256 != "" {
+		return errors.New("embedded release manifest cannot carry an artifact digest")
 	}
 	return nil
+}
+
+// ReadArtifactManifest reads and validates the manifest embedded in an
+// extracted component release.
+func ReadArtifactManifest(directory string, component Component, release string) (ReleaseManifest, error) {
+	data, err := readBoundedRegularFile(filepath.Join(directory, manifestAsset), maxManifestBytes)
+	if err != nil {
+		return ReleaseManifest{}, errors.New("artifact manifest is missing")
+	}
+	manifest, err := decodeReleaseManifest(data)
+	if err != nil {
+		return ReleaseManifest{}, err
+	}
+	if err := manifest.validate(component, release, false); err != nil {
+		return ReleaseManifest{}, err
+	}
+	return manifest, nil
+}
+
+// ValidateArtifactManifest checks that an extracted artifact declares the same
+// identity and requirements as the manifest published with its release.
+func ValidateArtifactManifest(directory string, expected ReleaseManifest) error {
+	embedded, err := ReadArtifactManifest(directory, expected.Component, expected.Release)
+	if err != nil {
+		return err
+	}
+	if !sameRequirements(embedded.Requires, expected.Requires) {
+		return errors.New("artifact requirements do not match the published release manifest")
+	}
+	return nil
+}
+
+func sameRequirements(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, minimum := range left {
+		if right[name] != minimum {
+			return false
+		}
+	}
+	return true
+}
+
+// unmetRequirement returns a description of the first requirement that the
+// planned component versions do not satisfy. Requirements on components that
+// are not part of this host are not checked here.
+func unmetRequirement(manifest ReleaseManifest, versions map[Component]string, updaterVersion string) string {
+	names := make([]string, 0, len(manifest.Requires))
+	for name := range manifest.Requires {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		minimum := manifest.Requires[name]
+		installed := ""
+		if name == RequirementUpdater {
+			if _, err := ParseVersion(updaterVersion); err != nil {
+				continue
+			}
+			installed = updaterVersion
+		} else {
+			version, present := versions[Component(name)]
+			if !present || version == "" {
+				continue
+			}
+			installed = version
+		}
+		if CompareTags(installed, minimum) < 0 {
+			return fmt.Sprintf("requires %s %s or newer", name, minimum)
+		}
+	}
+	return ""
 }

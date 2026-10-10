@@ -31,6 +31,10 @@ const (
 	ComponentCore    Component = "nexus-core"
 	ComponentSubs    Component = "nexus-subs"
 	ComponentDiscord Component = "nexus-discord"
+
+	// ComponentUpdater identifies the nexus updater itself in release lists.
+	// It is not a managed component and is rejected by validComponent.
+	ComponentUpdater Component = RequirementUpdater
 )
 
 // Profile is the closed set of installer topologies.

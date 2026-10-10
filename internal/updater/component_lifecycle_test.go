@@ -17,7 +17,7 @@ func TestRequiredSubsCanBeDisabledWithoutInvalidatingInstallation(t *testing.T) 
 			if profile != ProfileSubsOnly {
 				components[ComponentCore] = InstalledComponent{Installed: true, Enabled: true, CurrentRelease: "v1.0.0"}
 			}
-			state := InstallationState{Version: 1, Profile: profile, CurrentRelease: "v1.0.0", Components: components}
+			state := InstallationState{Profile: profile, Channel: ChannelStable, Components: components}
 			if err := SaveInstallation(paths, state); err != nil {
 				t.Fatalf("disabled Subs should remain installed: %v", err)
 			}
@@ -31,7 +31,7 @@ func TestRequiredSubsCanBeDisabledWithoutInvalidatingInstallation(t *testing.T) 
 
 func TestRestartRejectsDisabledComponent(t *testing.T) {
 	paths := NewTestPaths(t.TempDir())
-	state := InstallationState{Version: 1, Profile: ProfileSubsOnly, CurrentRelease: "v1.0.0", Components: map[Component]InstalledComponent{
+	state := InstallationState{Profile: ProfileSubsOnly, Channel: ChannelStable, Components: map[Component]InstalledComponent{
 		ComponentSubs: {Installed: true, Enabled: false, CurrentRelease: "v1.0.0"},
 	}}
 	if err := SaveInstallation(paths, state); err != nil {
@@ -51,7 +51,7 @@ func TestRestartRejectsDisabledComponent(t *testing.T) {
 
 func TestDisableRequiredSubsPersistsTheDisabledState(t *testing.T) {
 	paths := NewTestPaths(t.TempDir())
-	state := InstallationState{Version: 1, Profile: ProfileFull, CurrentRelease: "v1.0.0", Components: map[Component]InstalledComponent{
+	state := InstallationState{Profile: ProfileFull, Channel: ChannelStable, Components: map[Component]InstalledComponent{
 		ComponentCore: {Installed: true, Enabled: true, CurrentRelease: "v1.0.0"},
 		ComponentSubs: {Installed: true, Enabled: true, CurrentRelease: "v1.0.0"},
 	}}

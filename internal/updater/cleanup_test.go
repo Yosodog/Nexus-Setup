@@ -10,7 +10,7 @@ import (
 func TestCleanupProtectsCurrentPreviousAndPersistentData(t *testing.T) {
 	paths := NewTestPaths(t.TempDir())
 	state := InstallationState{
-		Version: 1, Profile: ProfileWebOnly, CurrentRelease: "v1.0.2", PreviousRelease: "v1.0.1",
+		Profile: ProfileWebOnly, Channel: ChannelStable,
 		Components: map[Component]InstalledComponent{
 			ComponentCore:    {Installed: true, Enabled: true, CurrentRelease: "v1.0.2", PreviousRelease: "v1.0.1"},
 			ComponentSubs:    {},
@@ -62,7 +62,7 @@ func TestCleanupProtectsCurrentPreviousAndPersistentData(t *testing.T) {
 func TestCleanupRemovesManagedReleaseLeftByFailedOptionalInstall(t *testing.T) {
 	paths := NewTestPaths(t.TempDir())
 	state := InstallationState{
-		Version: 1, Profile: ProfileWebOnly, CurrentRelease: "v1.0.2",
+		Profile: ProfileWebOnly, Channel: ChannelStable,
 		Components: map[Component]InstalledComponent{
 			ComponentCore:    {Installed: true, Enabled: true, CurrentRelease: "v1.0.2"},
 			ComponentSubs:    {},

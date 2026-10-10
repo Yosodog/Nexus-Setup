@@ -53,25 +53,25 @@ const (
 // contains no request payload, command output, URLs, environment values, or
 // secret material.
 type OperationState struct {
-	Version          int             `json:"version"`
-	ID               string          `json:"id"`
-	Operation        Operation       `json:"operation"`
-	Component        Component       `json:"component,omitempty"`
-	Source           string          `json:"source,omitempty"`
-	Fingerprint      string          `json:"fingerprint"`
-	HasConfiguration bool            `json:"has_configuration,omitempty"`
-	Releases         []string        `json:"releases,omitempty"`
-	Status           OperationStatus `json:"status"`
-	Phase            OperationPhase  `json:"phase"`
-	ProgressBytes    int64           `json:"progress_bytes,omitempty"`
-	ProgressTotal    int64           `json:"progress_total,omitempty"`
-	ReclaimedBytes   int64           `json:"reclaimed_bytes,omitempty"`
-	ErrorCode        string          `json:"error_code,omitempty"`
-	ErrorMessage     string          `json:"error_message,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
-	StartedAt        *time.Time      `json:"started_at,omitempty"`
-	FinishedAt       *time.Time      `json:"finished_at,omitempty"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	Version          int                `json:"version"`
+	ID               string             `json:"id"`
+	Operation        Operation          `json:"operation"`
+	Component        Component          `json:"component,omitempty"`
+	Source           string             `json:"source,omitempty"`
+	Fingerprint      string             `json:"fingerprint"`
+	HasConfiguration bool               `json:"has_configuration,omitempty"`
+	Releases         []ComponentRelease `json:"releases,omitempty"`
+	Status           OperationStatus    `json:"status"`
+	Phase            OperationPhase     `json:"phase"`
+	ProgressBytes    int64              `json:"progress_bytes,omitempty"`
+	ProgressTotal    int64              `json:"progress_total,omitempty"`
+	ReclaimedBytes   int64              `json:"reclaimed_bytes,omitempty"`
+	ErrorCode        string             `json:"error_code,omitempty"`
+	ErrorMessage     string             `json:"error_message,omitempty"`
+	CreatedAt        time.Time          `json:"created_at"`
+	StartedAt        *time.Time         `json:"started_at,omitempty"`
+	FinishedAt       *time.Time         `json:"finished_at,omitempty"`
+	UpdatedAt        time.Time          `json:"updated_at"`
 }
 
 type OperationStore struct {
@@ -327,7 +327,10 @@ func validateOperationState(state OperationState) error {
 		return errors.New("operation state phase is required")
 	}
 	for _, release := range state.Releases {
-		if _, err := ParseVersion(release); err != nil {
+		if (!validComponent(release.Component) && release.Component != ComponentUpdater) || release.Release == "" {
+			return errors.New("invalid operation state release")
+		}
+		if _, err := ParseVersion(release.Release); err != nil {
 			return errors.New("invalid operation state release")
 		}
 	}

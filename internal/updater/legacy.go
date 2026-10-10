@@ -26,7 +26,7 @@ var legacyPHPSocketPattern = regexp.MustCompile(`unix:/run/php/php[0-9]+\.[0-9]+
 type LegacyAssessment struct {
 	Detected   bool
 	Profile    Profile
-	Release    string
+	Releases   map[Component]string
 	Components []Component
 }
 
@@ -42,17 +42,13 @@ func AssessLegacyInstallation(ctx context.Context) (LegacyAssessment, error) {
 	if !coreExists && !subsExists {
 		return LegacyAssessment{}, nil
 	}
-	if coreExists && subsExists && coreRelease != subsRelease {
-		return LegacyAssessment{Detected: true}, errors.New("legacy Core and Subs are not on the same exact release tag")
-	}
-
-	assessment := LegacyAssessment{Detected: true}
+	assessment := LegacyAssessment{Detected: true, Releases: map[Component]string{}}
 	if coreExists {
-		assessment.Release = coreRelease
+		assessment.Releases[ComponentCore] = coreRelease
 		assessment.Components = append(assessment.Components, ComponentCore)
 	}
 	if subsExists {
-		assessment.Release = subsRelease
+		assessment.Releases[ComponentSubs] = subsRelease
 		assessment.Components = append(assessment.Components, ComponentSubs)
 	}
 
@@ -200,16 +196,28 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		return err
 	}
 	releases := NewGitHubReleaseClient()
-	available, err := releases.Releases(ctx, setupRepository, ChannelStable)
-	if err != nil || !releaseExists(available, assessment.Release) {
-		return errors.New("the matching canonical Nexus-Setup release is unavailable")
+	versions := assessment.Releases
+	channel := ChannelStable
+	manifests := map[Component]ReleaseManifest{}
+	for _, component := range assessment.Components {
+		manifest, manifestErr := releases.Manifest(ctx, component, versions[component])
+		if manifestErr != nil {
+			return fmt.Errorf("the published %s %s release is unavailable: %w", component, versions[component], manifestErr)
+		}
+		if reason := unmetRequirement(manifest, versions, BuildVersion); reason != "" {
+			return fmt.Errorf("legacy %s %s %s", component, versions[component], reason)
+		}
+		manifests[component] = manifest
+		if version, _ := ParseVersion(versions[component]); !version.Stable() {
+			channel = ChannelBeta
+		}
 	}
 	engine := DeploymentEngine{Config: config, Releases: releases, Executor: OSCommandExecutor{}}
 	if err := assertLegacyAdoptionTargetsAvailable(config.Paths, assessment.Components); err != nil {
 		return err
 	}
 	for _, component := range assessment.Components {
-		if err := engine.stageComponent(ctx, "adoption", component, assessment.Release); err != nil {
+		if err := engine.stageComponent(ctx, "adoption", manifests[component]); err != nil {
 			return err
 		}
 	}
@@ -279,16 +287,16 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		if err := copyLegacyCoreState(config.Paths); err != nil {
 			return err
 		}
-		if err := engine.prepareCoreRelease(assessment.Release); err != nil {
+		if err := engine.prepareCoreRelease(versions[ComponentCore]); err != nil {
 			return err
 		}
 		if err := configurePHPFPM(ctx, config.Paths); err != nil {
 			return err
 		}
-		if err := engine.runArtisan(ctx, assessment.Release, "migrate", "--force"); err != nil {
+		if err := engine.runArtisan(ctx, versions[ComponentCore], "migrate", "--force"); err != nil {
 			return fmt.Errorf("legacy database migration failed: %w", err)
 		}
-		if err := engine.runArtisan(ctx, assessment.Release, "up"); err != nil {
+		if err := engine.runArtisan(ctx, versions[ComponentCore], "up"); err != nil {
 			return fmt.Errorf("leave managed Core maintenance mode: %w", err)
 		}
 	}
@@ -298,15 +306,15 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 			if optionsErr != nil {
 				return optionsErr
 			}
-			if err := engine.writeStandaloneSubsConfiguration(assessment.Release, options); err != nil {
+			if err := engine.writeStandaloneSubsConfiguration(versions[ComponentSubs], options); err != nil {
 				return err
 			}
-		} else if err := engine.writeComponentConfiguration(ComponentSubs, assessment.Release, nil); err != nil {
+		} else if err := engine.writeComponentConfiguration(ComponentSubs, versions[ComponentSubs], nil); err != nil {
 			return err
 		}
 	}
 	for _, component := range assessment.Components {
-		if err := atomicSwitchRelease(config.Paths, component, assessment.Release); err != nil {
+		if err := atomicSwitchRelease(config.Paths, component, versions[component]); err != nil {
 			return err
 		}
 	}
@@ -327,7 +335,7 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		}
 		activatedUnits = append(activatedUnits, "nexus-scheduler.timer")
 	}
-	if err := engine.healthCheck(ctx, assessment.Components, assessment.Release); err != nil {
+	if err := engine.healthCheck(ctx, assessment.Components, versions); err != nil {
 		return err
 	}
 
@@ -347,10 +355,10 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		return err
 	}
 
-	state := InstallationState{Version: 1, Profile: assessment.Profile, CurrentRelease: assessment.Release, Components: map[Component]InstalledComponent{}}
+	state := InstallationState{Profile: assessment.Profile, Channel: channel, Components: map[Component]InstalledComponent{}}
 	for _, component := range []Component{ComponentCore, ComponentSubs, ComponentDiscord} {
 		installed := containsComponent(assessment.Components, component)
-		state.Components[component] = InstalledComponent{Installed: installed, Enabled: installed, CurrentRelease: conditionalRelease(installed, assessment.Release)}
+		state.Components[component] = InstalledComponent{Installed: installed, Enabled: installed, CurrentRelease: versions[component]}
 	}
 	if err := updateInstalledProfile(config.Paths, assessment.Profile); err != nil {
 		return err
@@ -365,7 +373,7 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		legacyMaintenance = false
 	}
 	completed = true
-	fmt.Printf("Legacy Nexus %s was adopted successfully. The original checkouts were preserved.\n", assessment.Release)
+	fmt.Printf("Legacy Nexus (%s) was adopted successfully. The original checkouts were preserved.\n", describeVersions(versions))
 	return nil
 }
 
@@ -407,15 +415,6 @@ func runLegacyArtisan(ctx context.Context, arguments ...string) error {
 	commandArguments := []string{"-u", "www-data", "--", "/usr/bin/php", artisan}
 	commandArguments = append(commandArguments, arguments...)
 	return runFixedCommandInDirectory(ctx, legacyCorePath, "/usr/sbin/runuser", commandArguments)
-}
-
-func releaseExists(releases []ReleaseInfo, release string) bool {
-	for _, candidate := range releases {
-		if candidate.Tag == release {
-			return true
-		}
-	}
-	return false
 }
 
 func copyLegacyCoreState(paths Paths) error {

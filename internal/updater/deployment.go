@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -70,160 +71,159 @@ func (engine DeploymentEngine) update(ctx context.Context, operation OperationSt
 	if err := ensureFreeSpace(engine.Config.Paths.StateDir, minimumReleaseSpace); err != nil {
 		return err
 	}
-	releases, err := engine.Releases.Releases(ctx, setupRepository, ChannelStable)
-	if err != nil {
-		return fmt.Errorf("discover GitHub releases: %w", err)
-	}
-	updates, err := UpdatesAfter(releases, installation.CurrentRelease)
+	plan, err := planForComponents(ctx, engine.Releases, installation.Channel, installedVersions(installation))
 	if err != nil {
 		return err
 	}
-	if len(updates) == 0 {
-		if BuildVersion != installation.CurrentRelease {
-			if err := engine.updateSelf(ctx, operation.ID, installation.CurrentRelease); err != nil {
-				return err
-			}
-			_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"try-restart", "nexus-updater.service"})
-		}
-		return nil
+	updater, err := latestUpdaterRelease(ctx, engine.Releases, installation.Channel)
+	if err != nil {
+		return err
 	}
-	releaseIDs := make([]string, 0, len(updates))
-	for _, release := range updates {
-		releaseIDs = append(releaseIDs, release.Tag)
+	targets := make([]ComponentRelease, 0, len(plan.Changes)+1)
+	for _, change := range plan.Changes {
+		targets = append(targets, ComponentRelease{Component: change.Component, Release: change.To})
+	}
+	if updater.Tag != "" {
+		targets = append(targets, ComponentRelease{Component: ComponentUpdater, Release: updater.Tag})
 	}
 	if _, err := engine.Store.Update(operation.ID, func(current *OperationState) error {
-		current.Releases = releaseIDs
+		current.Releases = targets
 		return nil
 	}); err != nil {
 		return err
 	}
-	for _, release := range updates {
-		if err := engine.applyRelease(ctx, operation.ID, &installation, release.Tag); err != nil {
+	if len(plan.Changes) > 0 {
+		if err := engine.applyPlan(ctx, operation.ID, &installation, plan); err != nil {
 			return err
 		}
 	}
-	if err := engine.updateSelf(ctx, operation.ID, updates[len(updates)-1].Tag); err != nil {
-		return err
+	if updater.Tag != "" {
+		if err := engine.updateSelf(ctx, operation.ID, updater.Tag); err != nil {
+			return err
+		}
+		_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"try-restart", "nexus-updater.service"})
 	}
-	_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"try-restart", "nexus-updater.service"})
 	return nil
 }
 
-func (engine DeploymentEngine) applyRelease(ctx context.Context, operationID string, installation *InstallationState, release string) error {
+// applyPlan stages, migrates, switches, restarts, and verifies the changed
+// components together. Unchanged components keep running their releases.
+func (engine DeploymentEngine) applyPlan(ctx context.Context, operationID string, installation *InstallationState, plan UpdatePlan) error {
 	if err := engine.phase(operationID, PhaseDownloading); err != nil {
 		return err
 	}
-	installed := installedComponents(*installation)
-	if len(installed) == 0 {
-		return errors.New("this host has no managed application components to update")
+	changed := make([]Component, 0, len(plan.Changes))
+	targets := installedVersions(*installation)
+	for _, change := range plan.Changes {
+		if !installation.Components[change.Component].Installed {
+			return fmt.Errorf("%s is not installed on this host", change.Component)
+		}
+		changed = append(changed, change.Component)
+		targets[change.Component] = change.To
 	}
-	running := enabledComponents(*installation)
-	hasCore := installation.Components[ComponentCore].Installed
-	for _, component := range installed {
-		if err := engine.stageComponent(ctx, operationID, component, release); err != nil {
+	for _, change := range plan.Changes {
+		if err := engine.stageComponent(ctx, operationID, plan.Manifests[change.Component]); err != nil {
 			return err
 		}
 	}
-	if hasCore {
+	previous := cloneInstallation(*installation)
+	oldVersions := installedVersions(previous)
+	running := intersectComponents(enabledComponents(previous), changed)
+	coreChanged := containsComponent(changed, ComponentCore)
+	coreRelease := oldVersions[ComponentCore]
+	leaveMaintenance := func(release string) error {
+		if !coreChanged {
+			return nil
+		}
+		if err := engine.runArtisan(ctx, release, "up"); err != nil {
+			return ErrRecoveryRequired
+		}
+		return nil
+	}
+	if coreChanged {
 		if err := engine.phase(operationID, PhaseMaintenance); err != nil {
 			return err
 		}
-		if err := engine.runArtisan(ctx, installation.CurrentRelease, "down", "--retry=60"); err != nil {
+		if err := engine.runArtisan(ctx, coreRelease, "down", "--retry=60"); err != nil {
 			return fmt.Errorf("enter maintenance mode: %w", err)
 		}
 		if err := engine.phase(operationID, PhaseMigrating); err != nil {
-			if upErr := engine.runArtisan(ctx, installation.CurrentRelease, "up"); upErr != nil {
-				return ErrRecoveryRequired
+			if upErr := leaveMaintenance(coreRelease); upErr != nil {
+				return upErr
 			}
 			return err
 		}
-		if err := engine.prepareCoreRelease(release); err != nil {
-			if upErr := engine.runArtisan(ctx, installation.CurrentRelease, "up"); upErr != nil {
-				return ErrRecoveryRequired
+		if err := engine.prepareCoreRelease(targets[ComponentCore]); err != nil {
+			if upErr := leaveMaintenance(coreRelease); upErr != nil {
+				return upErr
 			}
 			return err
 		}
-		if err := engine.runArtisan(ctx, release, "migrate", "--force"); err != nil {
-			if upErr := engine.runArtisan(ctx, installation.CurrentRelease, "up"); upErr != nil {
-				return ErrRecoveryRequired
+		if err := engine.runArtisan(ctx, targets[ComponentCore], "migrate", "--force"); err != nil {
+			if upErr := leaveMaintenance(coreRelease); upErr != nil {
+				return upErr
 			}
 			return fmt.Errorf("database migration failed: %w", err)
 		}
 	}
 	if err := engine.phase(operationID, PhaseActivating); err != nil {
-		if hasCore {
-			if upErr := engine.runArtisan(ctx, installation.CurrentRelease, "up"); upErr != nil {
-				return ErrRecoveryRequired
-			}
+		if upErr := leaveMaintenance(coreRelease); upErr != nil {
+			return upErr
 		}
 		return err
 	}
-	oldRelease := installation.CurrentRelease
-	for _, component := range installed {
-		if err := atomicSwitchRelease(engine.Config.Paths, component, release); err != nil {
-			if rollbackErr := engine.switchComponents(installed, oldRelease); rollbackErr != nil {
-				return ErrRecoveryRequired
-			}
-			if hasCore {
-				if upErr := engine.runArtisan(ctx, oldRelease, "up"); upErr != nil {
-					return ErrRecoveryRequired
-				}
-			}
-			return err
-		}
-	}
-	previousState := *installation
-	installation.PreviousRelease = oldRelease
-	installation.CurrentRelease = release
-	for component, record := range installation.Components {
-		if record.Installed {
-			record.PreviousRelease = record.CurrentRelease
-			record.CurrentRelease = release
-			installation.Components[component] = record
-		}
-	}
-	if err := SaveInstallation(engine.Config.Paths, *installation); err != nil {
-		if switchErr := engine.switchComponents(installed, oldRelease); switchErr != nil {
+	if err := engine.switchComponents(changed, targets); err != nil {
+		if rollbackErr := engine.switchComponents(changed, oldVersions); rollbackErr != nil {
 			return ErrRecoveryRequired
 		}
-		*installation = previousState
-		if hasCore {
-			if upErr := engine.runArtisan(ctx, oldRelease, "up"); upErr != nil {
-				return ErrRecoveryRequired
-			}
+		if upErr := leaveMaintenance(coreRelease); upErr != nil {
+			return upErr
+		}
+		return err
+	}
+	for _, component := range changed {
+		record := installation.Components[component]
+		record.PreviousRelease = record.CurrentRelease
+		record.CurrentRelease = targets[component]
+		installation.Components[component] = record
+	}
+	installation.LastChanged = changed
+	if err := SaveInstallation(engine.Config.Paths, *installation); err != nil {
+		if switchErr := engine.switchComponents(changed, oldVersions); switchErr != nil {
+			return ErrRecoveryRequired
+		}
+		*installation = previous
+		if upErr := leaveMaintenance(coreRelease); upErr != nil {
+			return upErr
 		}
 		return err
 	}
 	if err := engine.phase(operationID, PhaseRestarting); err != nil {
-		return engine.rollbackFailedRelease(ctx, installation, previousState, installed, running, hasCore)
+		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
 	if err := engine.restartComponents(ctx, running); err != nil {
-		return engine.rollbackFailedRelease(ctx, installation, previousState, installed, running, hasCore)
+		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
 	if err := engine.phase(operationID, PhaseHealthChecking); err != nil {
-		return engine.rollbackFailedRelease(ctx, installation, previousState, installed, running, hasCore)
+		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
-	if err := engine.healthCheck(ctx, running, release); err != nil {
-		return engine.rollbackFailedRelease(ctx, installation, previousState, installed, running, hasCore)
+	if err := engine.healthCheck(ctx, running, targets); err != nil {
+		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
-	if installation.Components[ComponentDiscord].Installed && installation.Components[ComponentDiscord].Enabled {
+	if containsComponent(running, ComponentDiscord) {
 		if err := engine.registerDiscordCommands(ctx); err != nil {
-			return engine.rollbackFailedRelease(ctx, installation, previousState, installed, running, hasCore)
+			return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 		}
 	}
-	if hasCore {
-		if err := engine.runArtisan(ctx, release, "up"); err != nil {
-			return ErrRecoveryRequired
-		}
+	if err := leaveMaintenance(targets[ComponentCore]); err != nil {
+		return err
 	}
 	return engine.phase(operationID, PhaseFinalizing)
 }
 
-func (engine DeploymentEngine) rollbackFailedRelease(ctx context.Context, installation *InstallationState, previous InstallationState, components, running []Component, hasCore bool) error {
-	if previous.CurrentRelease == "" {
-		return ErrRecoveryRequired
-	}
-	if err := engine.switchComponents(components, previous.CurrentRelease); err != nil {
+func (engine DeploymentEngine) rollbackFailedPlan(ctx context.Context, installation *InstallationState, previous InstallationState, changed, running []Component, coreChanged bool) error {
+	versions := installedVersions(previous)
+	if err := engine.switchComponents(changed, versions); err != nil {
 		return ErrRecoveryRequired
 	}
 	if err := SaveInstallation(engine.Config.Paths, previous); err != nil {
@@ -233,20 +233,40 @@ func (engine DeploymentEngine) rollbackFailedRelease(ctx context.Context, instal
 	if err := engine.restartComponents(ctx, running); err != nil {
 		return ErrRecoveryRequired
 	}
-	if err := engine.healthCheck(ctx, running, previous.CurrentRelease); err != nil {
+	if err := engine.healthCheck(ctx, running, versions); err != nil {
 		return ErrRecoveryRequired
 	}
-	if previous.Components[ComponentDiscord].Installed && previous.Components[ComponentDiscord].Enabled {
+	if containsComponent(running, ComponentDiscord) {
 		if err := engine.registerDiscordCommands(ctx); err != nil {
 			return ErrRecoveryRequired
 		}
 	}
-	if hasCore {
-		if err := engine.runArtisan(ctx, previous.CurrentRelease, "up"); err != nil {
+	if coreChanged {
+		if err := engine.runArtisan(ctx, versions[ComponentCore], "up"); err != nil {
 			return ErrRecoveryRequired
 		}
 	}
 	return ErrRolledBack
+}
+
+func cloneInstallation(state InstallationState) InstallationState {
+	clone := state
+	clone.Components = make(map[Component]InstalledComponent, len(state.Components))
+	for component, record := range state.Components {
+		clone.Components[component] = record
+	}
+	clone.LastChanged = append([]Component(nil), state.LastChanged...)
+	return clone
+}
+
+func intersectComponents(components, wanted []Component) []Component {
+	result := make([]Component, 0, len(components))
+	for _, component := range components {
+		if containsComponent(wanted, component) {
+			result = append(result, component)
+		}
+	}
+	return result
 }
 
 func installedComponents(state InstallationState) []Component {
@@ -270,13 +290,14 @@ func enabledComponents(state InstallationState) []Component {
 	return components
 }
 
-func (engine DeploymentEngine) stageComponent(ctx context.Context, operationID string, component Component, release string) error {
+func (engine DeploymentEngine) stageComponent(ctx context.Context, operationID string, manifest ReleaseManifest) error {
+	component, release := manifest.Component, manifest.Release
 	target, err := componentReleaseDirectory(engine.Config.Paths, component, release)
 	if err != nil {
 		return err
 	}
 	if info, err := os.Lstat(target); err == nil && info.IsDir() {
-		return ValidateArtifactIdentity(target, component, release)
+		return ValidateArtifactManifest(target, manifest)
 	}
 	repository, asset, err := componentReleaseAsset(component)
 	if err != nil {
@@ -303,12 +324,20 @@ func (engine DeploymentEngine) stageComponent(ctx context.Context, operationID s
 	if err := engine.phase(operationID, PhaseInspecting); err != nil {
 		return err
 	}
+	if err := verifyFileSHA256(artifact, manifest.ArtifactSHA256); err != nil {
+		_ = os.Remove(artifact)
+		return fmt.Errorf("%s %s: %w", component, release, err)
+	}
 	file, err := os.Open(artifact)
 	if err != nil {
 		return err
 	}
 	staging := filepath.Join(engine.Config.Paths.StagingDir, operationID, release, string(component))
 	_ = os.RemoveAll(staging)
+	if err := os.MkdirAll(filepath.Dir(staging), 0700); err != nil {
+		_ = file.Close()
+		return err
+	}
 	_, extractErr := ExtractTarGz(file, staging, DefaultArchiveLimits())
 	closeErr := file.Close()
 	if extractErr != nil {
@@ -317,7 +346,7 @@ func (engine DeploymentEngine) stageComponent(ctx context.Context, operationID s
 	if closeErr != nil {
 		return closeErr
 	}
-	if err := ValidateArtifactIdentity(staging, component, release); err != nil {
+	if err := ValidateArtifactManifest(staging, manifest); err != nil {
 		return err
 	}
 	if err := engine.phase(operationID, PhaseStaging); err != nil {
@@ -331,6 +360,22 @@ func (engine DeploymentEngine) stageComponent(ctx context.Context, operationID s
 	}
 	_ = os.RemoveAll(staging)
 	_ = os.Remove(downloadDirectory)
+	return nil
+}
+
+func verifyFileSHA256(path, expected string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return err
+	}
+	if hex.EncodeToString(digest.Sum(nil)) != expected {
+		return errors.New("downloaded artifact does not match its published SHA-256 digest")
+	}
 	return nil
 }
 
@@ -487,9 +532,9 @@ func (engine DeploymentEngine) runArtisan(ctx context.Context, release string, a
 	return runFixedCommandInDirectory(ctx, directory, "/usr/sbin/runuser", commandArguments)
 }
 
-func (engine DeploymentEngine) switchComponents(components []Component, release string) error {
+func (engine DeploymentEngine) switchComponents(components []Component, versions map[Component]string) error {
 	for _, component := range components {
-		if err := atomicSwitchRelease(engine.Config.Paths, component, release); err != nil {
+		if err := atomicSwitchRelease(engine.Config.Paths, component, versions[component]); err != nil {
 			return err
 		}
 	}
@@ -518,7 +563,7 @@ func (engine DeploymentEngine) registerDiscordCommands(ctx context.Context) erro
 	return nil
 }
 
-func (engine DeploymentEngine) healthCheck(ctx context.Context, components []Component, release string) error {
+func (engine DeploymentEngine) healthCheck(ctx context.Context, components []Component, versions map[Component]string) error {
 	var lastError error
 	for attempt := 0; attempt < 20; attempt++ {
 		lastError = nil
@@ -537,11 +582,11 @@ func (engine DeploymentEngine) healthCheck(ctx context.Context, components []Com
 				break
 			}
 			if component != ComponentCore {
-				if err := validateComponentHealth(engine.Config.Paths, component, release, time.Now().UTC()); err != nil {
+				if err := validateComponentHealth(engine.Config.Paths, component, versions[component], time.Now().UTC()); err != nil {
 					lastError = fmt.Errorf("%s health contract is not ready: %w", component, err)
 					break
 				}
-			} else if err := engine.runArtisan(ctx, release, "migrate:status", "--no-interaction"); err != nil {
+			} else if err := engine.runArtisan(ctx, versions[ComponentCore], "migrate:status", "--no-interaction"); err != nil {
 				lastError = errors.New("Core could not boot and read its database schema")
 				break
 			}
@@ -573,6 +618,17 @@ func (engine DeploymentEngine) updateSelf(ctx context.Context, operationID, rele
 	if err := engine.Releases.Download(ctx, setupRepository, release, setupAsset, temporary, maxUpdaterArtifact, nil); err != nil {
 		return err
 	}
+	checksumFile := temporary + ".sha256"
+	_ = os.Remove(checksumFile)
+	if err := engine.Releases.Download(ctx, setupRepository, release, setupChecksum, checksumFile, 4096, nil); err != nil {
+		return err
+	}
+	verifyErr := verifyChecksumFile(temporary, checksumFile, setupAsset)
+	_ = os.Remove(checksumFile)
+	if verifyErr != nil {
+		_ = os.Remove(temporary)
+		return verifyErr
+	}
 	if err := os.Chmod(temporary, 0755); err != nil {
 		return err
 	}
@@ -593,6 +649,19 @@ func (engine DeploymentEngine) updateSelf(ctx context.Context, operationID, rele
 		return err
 	}
 	return nil
+}
+
+// verifyChecksumFile checks a file against a sha256sum-format line naming it.
+func verifyChecksumFile(path, checksumPath, name string) error {
+	data, err := readBoundedRegularFile(checksumPath, 4096)
+	if err != nil {
+		return errors.New("release checksum is unavailable")
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != name || len(fields[0]) != 64 {
+		return errors.New("release checksum file is invalid")
+	}
+	return verifyFileSHA256(path, strings.ToLower(fields[0]))
 }
 
 func validateUpdaterBinary(ctx context.Context, binary, expected string) error {
@@ -619,70 +688,82 @@ func validateUpdaterBinary(ctx context.Context, binary, expected string) error {
 	return nil
 }
 
+// rollback restores the previous release of the components the last update
+// changed, or of one named component.
 func (engine DeploymentEngine) rollback(ctx context.Context, operation OperationState) error {
 	state, err := LoadInstallation(engine.Config.Paths)
 	if err != nil {
 		return err
 	}
-	if state.PreviousRelease == "" {
+	components := state.LastChanged
+	if operation.Component != "" {
+		record := state.Components[operation.Component]
+		if !record.Installed {
+			return fmt.Errorf("%s is not installed", operation.Component)
+		}
+		if record.PreviousRelease == "" {
+			return fmt.Errorf("no previous %s release is available", operation.Component)
+		}
+		components = []Component{operation.Component}
+	}
+	if len(components) == 0 {
 		return errors.New("no previous release is available")
 	}
-	components := installedComponents(state)
-	running := enabledComponents(state)
-	hasCore := state.Components[ComponentCore].Installed
+	oldVersions := installedVersions(state)
+	targets := installedVersions(state)
+	for _, component := range components {
+		targets[component] = state.Components[component].PreviousRelease
+	}
+	running := intersectComponents(enabledComponents(state), components)
+	coreChanged := containsComponent(components, ComponentCore)
 	if err := engine.phase(operation.ID, PhaseRollingBack); err != nil {
 		return err
 	}
-	for _, component := range components {
-		directory, err := componentReleaseDirectory(engine.Config.Paths, component, state.PreviousRelease)
-		if err != nil {
-			return err
-		}
-		if err := ValidateArtifactIdentity(directory, component, state.PreviousRelease); err != nil {
-			return fmt.Errorf("previous %s release is unavailable: %w", component, err)
-		}
+	if err := checkInstalledCompatibility(engine.Config.Paths, targets); err != nil {
+		return fmt.Errorf("rollback would leave incompatible releases: %w", err)
 	}
-	if hasCore {
-		if err := engine.runArtisan(ctx, state.CurrentRelease, "down", "--retry=60"); err != nil {
+	if coreChanged {
+		if err := engine.runArtisan(ctx, oldVersions[ComponentCore], "down", "--retry=60"); err != nil {
 			return fmt.Errorf("enter maintenance mode: %w", err)
 		}
 	}
-	current := state.CurrentRelease
-	if err := engine.switchComponents(components, state.PreviousRelease); err != nil {
-		if hasCore {
-			if upErr := engine.runArtisan(ctx, current, "up"); upErr != nil {
+	if err := engine.switchComponents(components, targets); err != nil {
+		if switchErr := engine.switchComponents(components, oldVersions); switchErr != nil {
+			return ErrRecoveryRequired
+		}
+		if coreChanged {
+			if upErr := engine.runArtisan(ctx, oldVersions[ComponentCore], "up"); upErr != nil {
 				return ErrRecoveryRequired
 			}
 		}
 		return err
 	}
-	state.CurrentRelease, state.PreviousRelease = state.PreviousRelease, current
-	for component, record := range state.Components {
-		if record.Installed {
-			record.CurrentRelease, record.PreviousRelease = record.PreviousRelease, record.CurrentRelease
-			state.Components[component] = record
-		}
+	for _, component := range components {
+		record := state.Components[component]
+		record.CurrentRelease, record.PreviousRelease = record.PreviousRelease, record.CurrentRelease
+		state.Components[component] = record
 	}
+	state.LastChanged = append([]Component(nil), components...)
 	if err := SaveInstallation(engine.Config.Paths, state); err != nil {
-		_ = engine.switchComponents(components, current)
-		if hasCore {
-			_ = engine.runArtisan(ctx, current, "up")
+		_ = engine.switchComponents(components, oldVersions)
+		if coreChanged {
+			_ = engine.runArtisan(ctx, oldVersions[ComponentCore], "up")
 		}
 		return ErrRecoveryRequired
 	}
 	if err := engine.restartComponents(ctx, running); err != nil {
 		return ErrRecoveryRequired
 	}
-	if err := engine.healthCheck(ctx, running, state.CurrentRelease); err != nil {
+	if err := engine.healthCheck(ctx, running, targets); err != nil {
 		return ErrRecoveryRequired
 	}
-	if state.Components[ComponentDiscord].Installed && state.Components[ComponentDiscord].Enabled {
+	if containsComponent(running, ComponentDiscord) {
 		if err := engine.registerDiscordCommands(ctx); err != nil {
 			return ErrRecoveryRequired
 		}
 	}
-	if hasCore {
-		if err := engine.runArtisan(ctx, state.CurrentRelease, "up"); err != nil {
+	if coreChanged {
+		if err := engine.runArtisan(ctx, targets[ComponentCore], "up"); err != nil {
 			return ErrRecoveryRequired
 		}
 	}
@@ -728,7 +809,26 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 	if err := ensureFreeSpace(engine.Config.Paths.StateDir, minimumComponentSpace); err != nil {
 		return err
 	}
-	releaseDirectory, err := componentReleaseDirectory(engine.Config.Paths, operation.Component, state.CurrentRelease)
+	if err := engine.phase(operation.ID, PhaseDownloading); err != nil {
+		return err
+	}
+	plan, err := planForComponents(ctx, engine.Releases, state.Channel, map[Component]string{operation.Component: ""})
+	if err != nil {
+		return err
+	}
+	manifest := plan.Manifests[operation.Component]
+	release := manifest.Release
+	versions := installedVersions(state)
+	if reason := unmetRequirement(manifest, versions, BuildVersion); reason != "" {
+		return fmt.Errorf("%s %s %s", operation.Component, release, reason)
+	}
+	if _, err := engine.Store.Update(operation.ID, func(current *OperationState) error {
+		current.Releases = []ComponentRelease{{Component: operation.Component, Release: release}}
+		return nil
+	}); err != nil {
+		return err
+	}
+	releaseDirectory, err := componentReleaseDirectory(engine.Config.Paths, operation.Component, release)
 	if err != nil {
 		return err
 	}
@@ -773,28 +873,32 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 			}
 		}
 	}()
-	if err := engine.stageComponent(ctx, operation.ID, operation.Component, state.CurrentRelease); err != nil {
+	if err := engine.stageComponent(ctx, operation.ID, manifest); err != nil {
+		return err
+	}
+	versions[operation.Component] = release
+	if err := checkInstalledCompatibility(engine.Config.Paths, versions); err != nil {
 		return err
 	}
 	configurationStarted = true
-	if err := engine.writeComponentConfiguration(operation.Component, state.CurrentRelease, configuration); err != nil {
+	if err := engine.writeComponentConfiguration(operation.Component, release, configuration); err != nil {
 		return err
 	}
 	if operation.Component == ComponentDiscord {
 		if err := engine.restartComponents(ctx, []Component{ComponentCore}); err != nil {
 			return fmt.Errorf("reload Core Discord configuration: %w", err)
 		}
-		if err := engine.healthCheck(ctx, []Component{ComponentCore}, state.CurrentRelease); err != nil {
+		if err := engine.healthCheck(ctx, []Component{ComponentCore}, versions); err != nil {
 			return fmt.Errorf("verify Core after Discord configuration: %w", err)
 		}
 	}
-	if err := atomicSwitchRelease(engine.Config.Paths, operation.Component, state.CurrentRelease); err != nil {
+	if err := atomicSwitchRelease(engine.Config.Paths, operation.Component, release); err != nil {
 		return err
 	}
 	if err := engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"enable", "--now", unit}); err != nil {
 		return err
 	}
-	if err := engine.healthCheck(ctx, []Component{operation.Component}, state.CurrentRelease); err != nil {
+	if err := engine.healthCheck(ctx, []Component{operation.Component}, versions); err != nil {
 		_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"disable", "--now", unit})
 		return err
 	}
@@ -803,7 +907,7 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 			return err
 		}
 	}
-	state.Components[operation.Component] = InstalledComponent{Installed: true, Enabled: true, CurrentRelease: state.CurrentRelease}
+	state.Components[operation.Component] = InstalledComponent{Installed: true, Enabled: true, CurrentRelease: release}
 	if operation.Component == ComponentSubs && state.Profile == ProfileWebOnly {
 		state.Profile = ProfileAppWebSubsRemoteDB
 	}
@@ -1234,7 +1338,7 @@ func (engine DeploymentEngine) setComponentEnabled(ctx context.Context, operatio
 		return err
 	}
 	if enabled {
-		if err := engine.healthCheck(ctx, []Component{operation.Component}, state.CurrentRelease); err != nil {
+		if err := engine.healthCheck(ctx, []Component{operation.Component}, installedVersions(state)); err != nil {
 			_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"disable", "--now", unit})
 			return err
 		}
@@ -1272,7 +1376,7 @@ func (engine DeploymentEngine) restartComponent(ctx context.Context, component C
 	if err := engine.restartComponents(ctx, []Component{component}); err != nil {
 		return err
 	}
-	return engine.healthCheck(ctx, []Component{component}, state.CurrentRelease)
+	return engine.healthCheck(ctx, []Component{component}, installedVersions(state))
 }
 
 func (engine DeploymentEngine) phase(operationID string, phase OperationPhase) error {

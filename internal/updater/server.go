@@ -34,19 +34,17 @@ func (launcher CommandWorkerLauncher) Launch(ctx context.Context, operationID st
 }
 
 type StatusData struct {
-	Available          bool              `json:"available"`
-	Installed          bool              `json:"installed"`
-	ErrorCode          string            `json:"error_code,omitempty"`
-	InstalledReleaseID string            `json:"installed_release_id,omitempty"`
-	PreviousReleaseID  string            `json:"previous_release_id,omitempty"`
-	UpdaterVersion     string            `json:"updater_version"`
-	Channel            string            `json:"channel"`
-	Profile            Profile           `json:"profile,omitempty"`
-	Platform           string            `json:"platform,omitempty"`
-	Host               HostStatus        `json:"host"`
-	Components         []ComponentStatus `json:"components"`
-	Operations         []OperationData   `json:"operations,omitempty"`
-	Cleanup            CleanupPreview    `json:"cleanup"`
+	Available      bool              `json:"available"`
+	Installed      bool              `json:"installed"`
+	ErrorCode      string            `json:"error_code,omitempty"`
+	UpdaterVersion string            `json:"updater_version"`
+	Channel        string            `json:"channel"`
+	Profile        Profile           `json:"profile,omitempty"`
+	Platform       string            `json:"platform,omitempty"`
+	Host           HostStatus        `json:"host"`
+	Components     []ComponentStatus `json:"components"`
+	Operations     []OperationData   `json:"operations,omitempty"`
+	Cleanup        CleanupPreview    `json:"cleanup"`
 }
 
 type HostStatus struct {
@@ -67,6 +65,7 @@ type ComponentStatus struct {
 	Enabled            bool      `json:"enabled"`
 	Version            string    `json:"installed_version,omitempty"`
 	ReleaseID          string    `json:"release_id,omitempty"`
+	PreviousReleaseID  string    `json:"previous_release_id,omitempty"`
 	RuntimeState       string    `json:"runtime_state"`
 	HealthState        string    `json:"health_state"`
 	ConfigurationState string    `json:"configuration_state"`
@@ -76,12 +75,13 @@ type ComponentStatus struct {
 }
 
 type UpdateData struct {
-	InstalledRelease string        `json:"installed_release,omitempty"`
-	LatestRelease    string        `json:"latest_release,omitempty"`
-	UpdateAvailable  bool          `json:"update_available"`
-	Releases         []ReleaseInfo `json:"releases"`
-	ReleaseNotes     string        `json:"release_notes,omitempty"`
-	PublishedAt      time.Time     `json:"published_at,omitempty"`
+	Channel         Channel              `json:"channel"`
+	UpdateAvailable bool                 `json:"update_available"`
+	Components      []ComponentChange    `json:"components"`
+	HeldBack        []HeldBackRelease    `json:"held_back,omitempty"`
+	UpdaterVersion  string               `json:"updater_version"`
+	UpdaterRelease  *ComponentChange     `json:"updater_release,omitempty"`
+	Installed       map[Component]string `json:"installed"`
 }
 
 type DoctorCheck struct {
@@ -292,17 +292,17 @@ func (server *Server) handleRequest(request Request) Response {
 }
 
 type OperationData struct {
-	OperationID  string         `json:"operation_id"`
-	Operation    Operation      `json:"operation"`
-	Component    Component      `json:"component_id,omitempty"`
-	Status       string         `json:"status"`
-	ErrorCode    string         `json:"error_code,omitempty"`
-	ErrorMessage string         `json:"error_message,omitempty"`
-	Releases     []string       `json:"releases,omitempty"`
-	CreatedAt    time.Time      `json:"created_at"`
-	StartedAt    *time.Time     `json:"started_at,omitempty"`
-	FinishedAt   *time.Time     `json:"finished_at,omitempty"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	OperationID  string             `json:"operation_id"`
+	Operation    Operation          `json:"operation"`
+	Component    Component          `json:"component_id,omitempty"`
+	Status       string             `json:"status"`
+	ErrorCode    string             `json:"error_code,omitempty"`
+	ErrorMessage string             `json:"error_message,omitempty"`
+	Releases     []ComponentRelease `json:"releases,omitempty"`
+	CreatedAt    time.Time          `json:"created_at"`
+	StartedAt    *time.Time         `json:"started_at,omitempty"`
+	FinishedAt   *time.Time         `json:"finished_at,omitempty"`
+	Metadata     map[string]any     `json:"metadata,omitempty"`
 }
 
 func operationResponseData(state OperationState) OperationData {
@@ -340,7 +340,7 @@ func errorResponse(id, code, message string) Response {
 }
 
 func (server *Server) statusData() StatusData {
-	data := StatusData{Available: true, UpdaterVersion: BuildVersion, Channel: "stable",
+	data := StatusData{Available: true, UpdaterVersion: BuildVersion, Channel: string(ChannelStable),
 		Host: HostStatus{DisplayName: "Local Nexus host", Location: "This server", ManagementMode: "local", CapabilityVersion: "1",
 			Capabilities: []string{}, LastContactAt: time.Now().UTC().Format(time.RFC3339)}}
 	if server.config.CurrentOS != "" {
@@ -348,8 +348,7 @@ func (server *Server) statusData() StatusData {
 	}
 	if state, err := LoadInstallation(server.config.Paths); err == nil {
 		data.Installed = true
-		data.InstalledReleaseID = state.CurrentRelease
-		data.PreviousReleaseID = state.PreviousRelease
+		data.Channel = string(state.Channel)
 		data.Profile = state.Profile
 		data.Host.Profile = state.Profile
 		if state.Profile == ProfileDatabaseOnly {
@@ -379,33 +378,35 @@ func (server *Server) checkUpdates(ctx context.Context) (UpdateData, error) {
 	if state.Profile == ProfileDatabaseOnly {
 		return UpdateData{}, errors.New("database-only hosts do not have a local Nexus application release to update")
 	}
-	releases, err := server.releases.Releases(ctx, setupRepository, ChannelStable)
+	installed := installedVersions(state)
+	plan, err := planForComponents(ctx, server.releases, state.Channel, installed)
 	if err != nil {
 		return UpdateData{}, err
 	}
-	updates, err := UpdatesAfter(releases, state.CurrentRelease)
+	updater, err := latestUpdaterRelease(ctx, server.releases, state.Channel)
 	if err != nil {
 		return UpdateData{}, err
 	}
-	data := UpdateData{InstalledRelease: state.CurrentRelease, Releases: updates, UpdateAvailable: len(updates) > 0}
-	if len(updates) > 0 {
-		latest := updates[len(updates)-1]
-		data.LatestRelease = latest.Tag
-		data.ReleaseNotes = latest.Notes
-		data.PublishedAt = latest.PublishedAt
+	data := UpdateData{Channel: state.Channel, Components: plan.Changes, HeldBack: plan.HeldBack, UpdaterVersion: BuildVersion, Installed: installed}
+	if data.Components == nil {
+		data.Components = []ComponentChange{}
 	}
+	if updater.Tag != "" {
+		data.UpdaterRelease = &ComponentChange{Component: ComponentUpdater, From: BuildVersion, To: updater.Tag, Notes: updater.Notes, PublishedAt: updater.PublishedAt}
+	}
+	data.UpdateAvailable = len(plan.Changes) > 0 || updater.Tag != ""
 	return data, nil
 }
 
 func (server *Server) componentData() []ComponentStatus {
 	state, _ := LoadInstallation(server.config.Paths)
-	canInstallOptional := state.Profile != ProfileDatabaseOnly && state.Profile != ProfileSubsOnly && state.CurrentRelease != ""
+	canInstallOptional := state.Profile != "" && state.Profile != ProfileDatabaseOnly && state.Profile != ProfileSubsOnly
 	statuses := make([]ComponentStatus, 0, 3)
 	for _, component := range []Component{ComponentCore, ComponentSubs, ComponentDiscord} {
 		record := state.Components[component]
 		configurationReady := componentConfigurationReady(server.config.Paths, component)
 		status := ComponentStatus{ID: component, Label: componentLabel(component), Required: component == ComponentCore || (component == ComponentSubs && (state.Profile == ProfileFull || state.Profile == ProfileAppWebSubsRemoteDB)),
-			Installed: record.Installed, Enabled: record.Enabled, Version: record.CurrentRelease, ReleaseID: record.CurrentRelease,
+			Installed: record.Installed, Enabled: record.Enabled, Version: record.CurrentRelease, ReleaseID: record.CurrentRelease, PreviousReleaseID: record.PreviousRelease,
 			RuntimeState: "not_installed", HealthState: "unknown", ConfigurationState: "not_configured", HostLocation: "This server", AvailableActions: []string{}}
 		if record.Installed {
 			if configurationReady {

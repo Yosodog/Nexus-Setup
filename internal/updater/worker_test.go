@@ -18,13 +18,16 @@ type emptyReleaseProvider struct{}
 func (emptyReleaseProvider) Releases(context.Context, string, Channel) ([]ReleaseInfo, error) {
 	return []ReleaseInfo{}, nil
 }
+func (emptyReleaseProvider) Manifest(context.Context, Component, string) (ReleaseManifest, error) {
+	return ReleaseManifest{}, nil
+}
 func (emptyReleaseProvider) Download(context.Context, string, string, string, string, int64, func(int64, int64)) error {
 	return nil
 }
 
 func TestWorkerUsesOnlyFixedServiceUnit(t *testing.T) {
 	paths := NewTestPaths(t.TempDir())
-	state := InstallationState{Version: 1, Profile: ProfileFull, CurrentRelease: "v1.0.0", Components: map[Component]InstalledComponent{
+	state := InstallationState{Profile: ProfileFull, Channel: ChannelStable, Components: map[Component]InstalledComponent{
 		ComponentCore: {Installed: true, Enabled: true, CurrentRelease: "v1.0.0"}, ComponentSubs: {Installed: true, Enabled: true, CurrentRelease: "v1.0.0"}, ComponentDiscord: {},
 	}}
 	if err := SaveInstallation(paths, state); err != nil {

@@ -197,7 +197,7 @@ func (r Request) Validate() error {
 	if componentOperation(r.Operation) && r.Component == "" {
 		return errors.New("component is required for this operation")
 	}
-	if !componentOperation(r.Operation) && r.Component != "" {
+	if !componentOperation(r.Operation) && r.Operation != OperationRollback && r.Component != "" {
 		return errors.New("component is not accepted for this operation")
 	}
 	if err := validateComponentConfiguration(r.Operation, r.Component, r.Configuration); err != nil {

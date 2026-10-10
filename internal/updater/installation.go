@@ -42,7 +42,23 @@ type InstalledComponent struct {
 	PreviousRelease string `json:"previous_release,omitempty"`
 }
 
+// InstallationState records what is installed on this host. Each component has
+// its own release history; LastChanged lists the components the most recent
+// update or rollback switched, which is what a plain rollback reverses.
 type InstallationState struct {
+	Version     int                              `json:"version"`
+	Profile     Profile                          `json:"profile"`
+	Channel     Channel                          `json:"channel"`
+	Components  map[Component]InstalledComponent `json:"components"`
+	LastChanged []Component                      `json:"last_changed,omitempty"`
+	UpdatedAt   time.Time                        `json:"updated_at"`
+}
+
+const installationStateVersion = 2
+
+// installationStateV1 is the original shape, in which every component shared
+// one Nexus release.
+type installationStateV1 struct {
 	Version         int                              `json:"version"`
 	Profile         Profile                          `json:"profile"`
 	CurrentRelease  string                           `json:"current_release"`
@@ -54,7 +70,11 @@ type InstallationState struct {
 func LoadInstallation(paths Paths) (InstallationState, error) {
 	var state InstallationState
 	if err := readStrictJSONFile(paths.InstallationDB, 256*1024, &state); err != nil {
-		return InstallationState{}, err
+		var legacy installationStateV1
+		if legacyErr := readStrictJSONFile(paths.InstallationDB, 256*1024, &legacy); legacyErr != nil || legacy.Version != 1 {
+			return InstallationState{}, err
+		}
+		state = migrateInstallationV1(legacy)
 	}
 	if err := validateInstallation(state); err != nil {
 		return InstallationState{}, err
@@ -62,8 +82,20 @@ func LoadInstallation(paths Paths) (InstallationState, error) {
 	return state, nil
 }
 
+func migrateInstallationV1(legacy installationStateV1) InstallationState {
+	state := InstallationState{Version: installationStateVersion, Profile: legacy.Profile, Channel: ChannelStable, Components: legacy.Components, UpdatedAt: legacy.UpdatedAt}
+	if legacy.PreviousRelease != "" {
+		for _, component := range planOrder {
+			if state.Components[component].Installed && state.Components[component].PreviousRelease != "" {
+				state.LastChanged = append(state.LastChanged, component)
+			}
+		}
+	}
+	return state
+}
+
 func SaveInstallation(paths Paths, state InstallationState) error {
-	state.Version = 1
+	state.Version = installationStateVersion
 	state.UpdatedAt = time.Now().UTC()
 	if err := validateInstallation(state); err != nil {
 		return err
@@ -72,16 +104,11 @@ func SaveInstallation(paths Paths, state InstallationState) error {
 }
 
 func validateInstallation(state InstallationState) error {
-	if state.Version != 1 || !validProfile(state.Profile) {
+	if state.Version != installationStateVersion || !validProfile(state.Profile) {
 		return errors.New("installation state version or profile is invalid")
 	}
-	if _, err := ParseVersion(state.CurrentRelease); err != nil {
-		return errors.New("installation current release is invalid")
-	}
-	if state.PreviousRelease != "" {
-		if _, err := ParseVersion(state.PreviousRelease); err != nil {
-			return errors.New("installation previous release is invalid")
-		}
+	if !validChannel(state.Channel) {
+		return errors.New("installation release channel is invalid")
 	}
 	core := state.Components[ComponentCore]
 	subs := state.Components[ComponentSubs]
@@ -111,12 +138,32 @@ func validateInstallation(state InstallationState) error {
 			if _, err := ParseVersion(installed.CurrentRelease); err != nil {
 				return fmt.Errorf("installed component %q has an invalid release", component)
 			}
-			if installed.CurrentRelease != state.CurrentRelease {
-				return fmt.Errorf("installed component %q is not on the Nexus release", component)
+		}
+		if installed.PreviousRelease != "" {
+			if _, err := ParseVersion(installed.PreviousRelease); err != nil {
+				return fmt.Errorf("installed component %q has an invalid previous release", component)
 			}
 		}
 	}
+	seen := map[Component]bool{}
+	for _, component := range state.LastChanged {
+		if seen[component] || !state.Components[component].Installed || state.Components[component].PreviousRelease == "" {
+			return errors.New("installation last-changed components are invalid")
+		}
+		seen[component] = true
+	}
 	return nil
+}
+
+// installedVersions maps each installed component to its current release.
+func installedVersions(state InstallationState) map[Component]string {
+	versions := map[Component]string{}
+	for _, component := range planOrder {
+		if record := state.Components[component]; record.Installed {
+			versions[component] = record.CurrentRelease
+		}
+	}
+	return versions
 }
 
 func componentRoot(paths Paths, component Component) (string, error) {

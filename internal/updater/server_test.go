@@ -16,7 +16,7 @@ func (launcher *recordingLauncher) Launch(_ context.Context, id string) error {
 func TestServerAcceptsFixedMutationAndMakesRetryIdempotent(t *testing.T) {
 	config := DefaultConfig()
 	config.Paths = NewTestPaths(t.TempDir())
-	state := InstallationState{Version: 1, Profile: ProfileWebOnly, CurrentRelease: "v1.2.3", Components: map[Component]InstalledComponent{
+	state := InstallationState{Profile: ProfileWebOnly, Channel: ChannelStable, Components: map[Component]InstalledComponent{
 		ComponentCore: {Installed: true, Enabled: true, CurrentRelease: "v1.2.3"}, ComponentSubs: {}, ComponentDiscord: {Installed: true, Enabled: true, CurrentRelease: "v1.2.3"},
 	}}
 	if err := SaveInstallation(config.Paths, state); err != nil {
@@ -39,7 +39,7 @@ func TestServerAcceptsFixedMutationAndMakesRetryIdempotent(t *testing.T) {
 func TestStatusUsesRootInstallationState(t *testing.T) {
 	config := DefaultConfig()
 	config.Paths = NewTestPaths(t.TempDir())
-	state := InstallationState{Version: 1, Profile: ProfileWebOnly, CurrentRelease: "v1.2.3", Components: map[Component]InstalledComponent{
+	state := InstallationState{Profile: ProfileWebOnly, Channel: ChannelStable, Components: map[Component]InstalledComponent{
 		ComponentCore: {Installed: true, Enabled: true, CurrentRelease: "v1.2.3"}, ComponentSubs: {}, ComponentDiscord: {},
 	}}
 	if err := SaveInstallation(config.Paths, state); err != nil {
@@ -54,7 +54,7 @@ func TestStatusUsesRootInstallationState(t *testing.T) {
 	if err := json.Unmarshal(response.Data, &status); err != nil {
 		t.Fatal(err)
 	}
-	if !status.Installed || status.InstalledReleaseID != "v1.2.3" || len(status.Components) != 3 {
+	if !status.Installed || status.Components[0].ReleaseID != "v1.2.3" || status.Channel != "stable" || len(status.Components) != 3 {
 		t.Fatalf("unexpected status: %+v", status)
 	}
 }

@@ -30,7 +30,15 @@ installation accepts configuration, limited to `bot_token`, `client_id`, and
 `guild_id`. The coordinator moves those write-only values into a root-owned
 runtime file and does not write them into operation state.
 
+`Rollback` optionally accepts a `component_id`. Without one it restores the
+previous release of every component the last update changed.
+
 Unknown fields, operations, components, paths, URLs, commands, service names,
 and non-canonical UUIDs are rejected. The updater independently discovers
-stable releases from the hardcoded official `Yosodog/Nexus-Setup` GitHub
-repository and maps components to hardcoded repositories and asset names.
+releases from hardcoded official GitHub repositories: `Yosodog/Nexus-Setup`
+for itself and one repository per component, each versioned independently.
+It never accepts a release, repository, or asset name from a caller.
+
+`CheckUpdates` returns the planned `components` changes, any `held_back`
+releases with the unmet requirement, and an optional `updater_release`.
+`GetStatus` reports each component's `release_id` and `previous_release_id`.

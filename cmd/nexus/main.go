@@ -22,6 +22,8 @@ import (
 
 var stdinReader = bufio.NewReader(os.Stdin)
 
+var componentByName = map[string]updater.Component{"core": updater.ComponentCore, "subs": updater.ComponentSubs, "discord": updater.ComponentDiscord}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "nexus:", err)
@@ -128,10 +130,10 @@ Usage:
 
 Commands:
   install                         Install or adopt Nexus
-  update [--check] [--yes]        Check for or install stable updates
+  update [--check] [--yes]        Check for or install updates
   status [--json]                 Show the installed release and services
   doctor [--json]                 Run read-only host diagnostics
-  rollback [--yes]                Restore the previous code release
+  rollback [component] [--yes]    Restore previous component releases
   cleanup [--yes]                 Remove old managed releases
   component list [--json]         List Core, Subs, and Discord
   component install <name>        Install Subs or Discord
@@ -147,13 +149,13 @@ Mutation commands accept --yes for intentional non-interactive use.
 	case "install":
 		return "Usage: nexus install [--yes]\n\nGuided installation or adoption of a standard legacy Nexus deployment.\n", nil
 	case "update":
-		return "Usage: nexus update [--check] [--yes]\n\nChecks official Nexus GitHub releases and applies every required stable release in order.\n", nil
+		return "Usage: nexus update [--check] [--yes]\n\nChecks each component's official GitHub releases on this host's channel and\ninstalls the newest releases that are compatible with each other.\n", nil
 	case "status":
 		return "Usage: nexus status [--json]\n", nil
 	case "doctor":
 		return "Usage: nexus doctor [--json]\n", nil
 	case "rollback":
-		return "Usage: nexus rollback [--yes]\n\nRestores the immediately previous code release. Database migrations are not reversed.\n", nil
+		return "Usage: nexus rollback [core|subs|discord] [--yes]\n\nWithout a component, restores the previous release of every component the last\nupdate changed. With a component, restores only that component's previous\nrelease. Database migrations are not reversed.\n", nil
 	case "cleanup":
 		return "Usage: nexus cleanup [--yes]\n\nKeeps current and previous releases and removes older managed deployment files.\n", nil
 	case "component":
@@ -246,10 +248,19 @@ func commandRequest(arguments []string) (updater.Request, error) {
 		}
 		return requestFor(updater.OperationUpdate)
 	case "rollback":
-		if len(arguments) != 1 {
-			return updater.Request{}, errors.New("usage: nexus rollback [--yes]")
+		if len(arguments) > 2 {
+			return updater.Request{}, errors.New("usage: nexus rollback [core|subs|discord] [--yes]")
 		}
-		return requestFor(updater.OperationRollback)
+		request, err := requestFor(updater.OperationRollback)
+		if err != nil || len(arguments) == 1 {
+			return request, err
+		}
+		component, exists := componentByName[arguments[1]]
+		if !exists {
+			return updater.Request{}, errors.New("component must be core, subs, or discord")
+		}
+		request.Component = component
+		return request, nil
 	case "cleanup":
 		if len(arguments) != 1 {
 			return updater.Request{}, errors.New("usage: nexus cleanup [--yes]")
@@ -271,7 +282,6 @@ func componentRequest(arguments []string) (updater.Request, error) {
 	if len(arguments) != 2 {
 		return updater.Request{}, errors.New("usage: nexus component <install|enable|disable|restart> <subs|discord|core>")
 	}
-	componentByName := map[string]updater.Component{"core": updater.ComponentCore, "subs": updater.ComponentSubs, "discord": updater.ComponentDiscord}
 	component, exists := componentByName[arguments[1]]
 	if !exists {
 		return updater.Request{}, errors.New("component must be core, subs, or discord")
@@ -383,18 +393,28 @@ func printUpdateSummary(response updater.Response) (bool, error) {
 	if err := updater.DecodeResponseData(response, &data); err != nil {
 		return false, err
 	}
+	fmt.Printf("Channel: %s\n", data.Channel)
+	for _, change := range data.Components {
+		fmt.Printf("  %-14s %s -> %s\n", change.Component, change.From, change.To)
+	}
+	if data.UpdaterRelease != nil {
+		fmt.Printf("  %-14s %s -> %s\n", updater.ComponentUpdater, data.UpdaterRelease.From, data.UpdaterRelease.To)
+	}
+	needsUpdater := false
+	for _, held := range data.HeldBack {
+		fmt.Printf("  %-14s %s is held back: %s\n", held.Component, held.Release, held.Reason)
+		needsUpdater = needsUpdater || held.NeedsUpdater
+	}
+	if needsUpdater && data.UpdaterRelease != nil {
+		fmt.Println("Run nexus update again after this update finishes to install the held-back releases.")
+	}
 	if !data.UpdateAvailable {
-		fmt.Printf("Nexus %s is already current.\n", data.InstalledRelease)
+		fmt.Println("Nexus is up to date.")
 		return false, nil
 	}
-	ids := make([]string, 0, len(data.Releases))
-	for _, release := range data.Releases {
-		ids = append(ids, release.Tag)
-	}
-	fmt.Printf("Installed: %s\nTarget: %s\nReleases to apply: %s\n", data.InstalledRelease, data.LatestRelease, strings.Join(ids, ", "))
-	for _, release := range data.Releases {
-		if release.Notes != "" {
-			fmt.Printf("\n%s\n%s\n", release.Tag, release.Notes)
+	for _, change := range data.Components {
+		if change.Notes != "" {
+			fmt.Printf("\n%s %s\n%s\n", change.Component, change.To, change.Notes)
 		}
 	}
 	return true, nil
@@ -573,9 +593,9 @@ func runInstall(arguments []string) error {
 	if assessment.Detected {
 		componentNames := make([]string, 0, len(assessment.Components))
 		for _, component := range assessment.Components {
-			componentNames = append(componentNames, string(component))
+			componentNames = append(componentNames, string(component)+" "+assessment.Releases[component])
 		}
-		fmt.Fprintf(os.Stderr, "Detected a standard legacy Nexus %s installation (%s).\n", assessment.Release, strings.Join(componentNames, ", "))
+		fmt.Fprintf(os.Stderr, "Detected a standard legacy Nexus installation (%s).\n", strings.Join(componentNames, ", "))
 		fmt.Fprintln(os.Stderr, "The managed release will be installed alongside it and the original checkout will be preserved.")
 		if !*yes {
 			confirmed, confirmErr := confirm("Adopt this installation now? [y/N]: ")

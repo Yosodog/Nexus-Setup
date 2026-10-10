@@ -20,7 +20,11 @@ UUID, inspect it with `sudo nexus operation show <uuid>`.
   [installation guide](getting-started.md) are supported.
 - **Download or package error:** check outbound DNS and HTTPS access to GitHub
   Releases and the package repositories. Bootstrap downloads the latest
-  published binary; it does not build the local checkout.
+  published binary; it does not build a local checkout.
+- **No release found for the stable channel:** before the first stable
+  release, only beta releases exist. Rerun bootstrap with `--channel beta`.
+- **Checksum mismatch:** the download was corrupted or altered. Retry; if it
+  keeps failing, do not install that binary and report it.
 - **`nexus` cannot connect to the updater socket:** check
   `sudo systemctl status nexus-updater.socket nexus-updater.service` and
   `sudo journalctl -u nexus-updater.service -n 100 --no-pager`. Immediately
@@ -29,13 +33,23 @@ UUID, inspect it with `sudo nexus operation show <uuid>`.
 
 ## Installation stops before completion
 
-- **Invalid installer answers:** the domain must be a hostname with a dot;
-  administrator and alliance IDs must be numeric; the administrator password
-  must be at least 12 characters. Remote database answers cannot be blank.
-  Core profiles also require a separate Politics & War mutation key.
-  A database-only host needs two different private IPv4 addresses, and its
-  listen address must belong to that host. A Subs-only host needs an HTTPS
-  Core API URL and both tokens.
+- **An answer is rejected:** each prompt explains what it expects and asks
+  again, up to five times. The domain must be a hostname with a dot and no
+  `https://`; nation and alliance IDs are the numbers from their Politics & War
+  URLs; the administrator password needs at least 12 characters. A
+  database-only host needs two different private IPv4 addresses, and a
+  Subs-only host needs an HTTPS Core API URL.
+- **Domain does not resolve:** create the DNS A record for the domain, wait
+  until `getent hosts your.domain` returns this server's address, and run the
+  installer again. Nothing was changed.
+- **Domain warning:** the domain resolves, but this server could not reach
+  itself through it on port 80. Check that the record points at this server and
+  that the firewall or cloud security group allows inbound port 80. Some
+  networks cannot reach their own public address; if you are sure DNS and the
+  firewall are right, you can continue.
+- **Politics & War rejected the API key, or the alliance or nation does not
+  exist:** copy the key again from the Politics & War Account page and check
+  the IDs. Nothing was changed.
 - **Package or release download fails:** verify outbound network access and
   available space, then inspect the command error. `sudo nexus doctor` reports
   free space for later updates; a fresh installation also checks space.
@@ -93,7 +107,9 @@ sudo journalctl -u "nexus-updater-worker@UUID.service" -n 100 --no-pager
 ## Legacy checkout detected
 
 `sudo nexus install` can adopt a recognized standard legacy deployment. It
-shows the detected release and components and preserves the old checkout.
+shows each detected component and its release and preserves the old checkout.
+Each checkout must be on a published release tag of its own repository; Core
+and Subs no longer need to be on the same tag.
 If assessment fails or the installation is modified or unknown, stop and
 inspect that deployment before changing it. `install_nexus.sh` is retired;
 use the guided command instead.

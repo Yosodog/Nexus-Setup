@@ -13,10 +13,12 @@ sudo nexus component list
 sudo nexus update --check
 ```
 
-`status` reports the profile, release, component state, and recent operations.
+`status` reports the profile, release channel, each component's current and
+previous release, component state, and recent operations.
 `doctor` checks installation state, disk space, and managed directories.
 `component list` shows which local components are installed and healthy.
-`update --check` lists stable releases that would be applied. Database-only
+`update --check` lists the release each component would move to, any newer
+release that is held back and why, and any newer `nexus` updater. Database-only
 hosts have no application release and cannot use update commands.
 
 Core installations made before the mutation-key prompt was added need
@@ -36,18 +38,39 @@ sudo nexus status
 sudo nexus component list
 ```
 
-The updater applies each intermediate stable release in order, runs
-forward-only database migrations, activates the new code, and checks local
-components. If health checks fail after activation, it switches code back to
-the previous release. Database migrations are **not** reversed. If the update
-finishes unsuccessfully, inspect the operation before retrying.
+Core, Subs, and Discord are versioned separately. The updater moves each
+installed component straight to its newest release that is compatible with the
+others, runs forward-only database migrations when Core changes, activates the
+new code, and checks the changed components. A release that needs a newer
+version of another component is held back until that version is available;
+`update --check` shows the reason. If health checks fail after activation, the
+changed components switch back to their previous releases. Database migrations
+are **not** reversed. If the update finishes unsuccessfully, inspect the
+operation before retrying. When a held-back release needs a newer updater, run
+`sudo nexus update` again after the updater has updated itself.
 
-`sudo nexus rollback` restores the immediately previous **code** release when
-one exists. It does not restore the database. Check application and data
-compatibility before using it. To reclaim old managed releases, run
+`sudo nexus rollback` restores the previous **code** release of every component
+the last update changed. `sudo nexus rollback subs` (or `core`, `discord`)
+restores only that component. Rollback refuses to leave components on releases
+that are incompatible with each other. It does not restore the database. Check
+application and data compatibility before using it. To reclaim old managed releases, run
 `sudo nexus cleanup`; the command previews what it will remove and keeps the
 current and previous release. It leaves database data, credentials, uploads,
 writable storage, operation history, and preserved legacy checkouts alone.
+
+## Choose a release channel
+
+```bash
+sudo nexus channel
+sudo nexus channel beta
+sudo nexus channel stable
+```
+
+The **stable** channel follows stable releases only. The **beta** channel also
+installs prereleases such as `v1.4.0-beta.1`, which get less testing. A new
+channel applies to the next `nexus update`. Switching back to stable never
+downgrades anything: components stay on their prereleases until a stable
+release is newer.
 
 ## Install and control components
 
@@ -61,7 +84,9 @@ sudo nexus component restart subs
 sudo nexus component restart discord
 ```
 
-Install Subs only if it is absent on a Core host. It reuses Core's local
+A component installed later gets the newest release on the host's channel that
+is compatible with the installed components. Install Subs only if it is absent
+on a Core host. It reuses Core's local
 configuration. Discord is optional: first create a Discord application and
 bot, then install it on a Core host. The command asks for its bot token,
 application ID, and guild ID. The IDs must be 17–20 digit numbers. Invite

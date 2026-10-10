@@ -35,8 +35,8 @@ and write to that database. Restrict database access to the application host.
 
 On the application host:
 
-1. Run `sudo ./bootstrap.sh` from the cloned Setup repository, then
-   `sudo nexus install`.
+1. [Bootstrap the `nexus` command](getting-started.md#2-bootstrap-the-nexus-command),
+   then run `sudo nexus install`.
 2. Choose **2** or **3**.
 3. Enter the domain and the same administrator and Politics & War values as
    profile 1. Then enter the remote database host, name, user, and password.

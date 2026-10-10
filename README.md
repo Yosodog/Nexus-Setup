@@ -38,10 +38,15 @@ Follow the [step-by-step installation guide](docs/getting-started.md) for
 prerequisites, every prompt, and verification. The short path is:
 
 ```bash
-git clone https://github.com/Yosodog/Nexus-Setup.git
-cd Nexus-Setup
-sudo ./bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/Yosodog/Nexus-Setup/main/bootstrap.sh | sudo bash
 sudo nexus install
+```
+
+To follow beta releases, pass `--channel beta` to both:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Yosodog/Nexus-Setup/main/bootstrap.sh | sudo bash -s -- --channel beta
+sudo nexus install --channel beta
 ```
 
 The default profile installs Core and Subs on one server with a local database.
@@ -59,8 +64,9 @@ nexus status
 nexus doctor
 nexus update --check
 nexus update
-nexus rollback
+nexus rollback [core|subs|discord]
 nexus cleanup
+nexus channel [stable|beta]
 
 nexus component list
 nexus component install subs|discord
@@ -76,22 +82,25 @@ for its required configuration. Immediately after bootstrap, use
 `sudo nexus ...`; after signing out and back in, the operator account selected
 by bootstrap can use the command without `sudo`.
 
-`nexus update` discovers stable releases from the official
-`Yosodog/Nexus-Setup` GitHub Releases page, applies every intermediate release,
-runs forward-only database migrations, switches versioned release directories,
-and health-checks all installed local components. If post-activation health
-fails, code switches back to the immediately previous release; migrations are
-not reversed.
+`nexus update` checks each installed component's official GitHub Releases on
+the host's channel and moves every component to its newest release whose
+requirements the others meet. Components are versioned independently, so an
+update usually touches only the components that have new releases. It runs
+forward-only database migrations when Core changes, switches versioned release
+directories, and health-checks the changed components. If post-activation
+health fails, the changed components switch back to their previous releases;
+migrations are not reversed. The updater then updates itself if a newer
+`nexus` release exists.
 
 The updater does **not** make a database backup. Take a manual database snapshot
 before an update if the installation's data matters to you. Release maintainers
-must keep each stable migration compatible with the immediately previous Core
-release so code rollback can work. A failed migration or interrupted operation
+must keep each migration compatible with the immediately previous Core release
+so code rollback can work. A failed migration or interrupted operation
 may require an operator to inspect `nexus status`, `nexus doctor`, and
 `nexus operation show <uuid>` locally before retrying. Do not manually delete
 operation state to force another update.
 
-`nexus cleanup` keeps the current and previous release for every component and
+`nexus cleanup` keeps the current and previous release of every component and
 removes only older managed release directories plus stale download/staging
 files. It never removes database data, credentials, uploads, writable storage,
 operation history, or preserved legacy checkouts.
@@ -104,30 +113,55 @@ Subs-only hosts are operated with the local CLI.
 
 ## Release contract
 
-All four repositories publish the same stable `vMAJOR.MINOR.PATCH` tag:
+Each repository is versioned and released on its own:
 
-| Repository | Fixed asset |
+| Repository | Release assets |
 |---|---|
-| `Nexus-Setup` | `nexus-linux-amd64` |
-| `Nexus-AMS` | `nexus-core.tar.gz` |
-| `Nexus-AMS-Subs` | `nexus-subs.tar.gz` |
-| `Nexus-AMS-Discord` | `nexus-discord.tar.gz` |
+| `Nexus-Setup` | `nexus-linux-amd64`, `nexus-linux-amd64.sha256` |
+| `Nexus-AMS` | `nexus-core.tar.gz`, `nexus-release.json` |
+| `Nexus-AMS-Subs` | `nexus-subs.tar.gz`, `nexus-release.json` |
+| `Nexus-AMS-Discord` | `nexus-discord.tar.gz`, `nexus-release.json` |
 
-Core, Subs, and Discord publish first. Setup verifies those public releases and
-assets before publishing the canonical release. Stable releases must not be
-deleted because updates apply them sequentially.
+Tags are `vMAJOR.MINOR.PATCH`, optionally with a prerelease suffix such as
+`v1.4.0-beta.1`. Pushing a tag runs the repository's release workflow, which
+tests, builds, and publishes the release; tags with a suffix are published as
+GitHub prereleases and are visible only to hosts on the beta channel. A hotfix
+is a tag in the one repository that needs it.
 
-Publish every stable version in sequence, including intermediate patch
-releases. Do not publish a new Setup tag until matching Core, Subs, and Discord
-assets are public. The Setup release workflow checks their presence. A failed
-Core test suite blocks publication; do not bypass it to produce an incomplete
-canonical release. Verify a clean installation, update from the prior stable
-version, rollback, and cleanup on every supported OS image before calling a
-release stable.
+Every component release publishes `nexus-release.json`, which is also embedded
+in the artifact:
 
-The updater intentionally trusts official GitHub Releases. It does not use
-TUF, release signatures, checksum files, provenance enforcement, or automatic
-database backups.
+```json
+{
+  "schema_version": 2,
+  "component": "nexus-subs",
+  "release": "v0.4.0",
+  "requires": { "nexus-core": "v1.5.0" },
+  "artifact_sha256": "…"
+}
+```
+
+`requires` lists the minimum version of each other component (`nexus-core`,
+`nexus-subs`, `nexus-discord`) or of the updater (`nexus-updater`) that the
+release needs. Declare a requirement whenever a release depends on a newer API
+or behavior in another piece; the updater holds back a release until its
+requirements can be met, updates the required component in the same run when
+it can, and refuses a rollback that would break a requirement. Requirements on
+components that run on a different host (for example Core, from a Subs-only
+host) are not checked. Each component repository keeps its requirements in
+`nexus-release.requires.json`.
+
+Releases are installed directly at the newest compatible version, so
+intermediate releases do not need to stay published, but keep each Core
+migration safe to run after any earlier supported release. A failed test suite
+blocks publication. Verify a clean installation, update from the previous
+release, rollback, and cleanup on every supported OS image before publishing a
+stable release.
+
+The updater trusts official GitHub Releases. It verifies every download
+against the SHA-256 digest published with the release, which catches corrupt or
+substituted transfers, but it does not use TUF, release signatures, provenance
+enforcement, or automatic database backups.
 
 ## Legacy installer
 

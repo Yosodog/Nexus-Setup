@@ -80,6 +80,11 @@ func ExtractTarGz(reader io.Reader, destination string, limits ArchiveLimits) (E
 		if result.Files+result.Directories >= limits.MaxFiles {
 			return ExtractionResult{}, errors.New("archive contains too many entries")
 		}
+		if header.Typeflag == tar.TypeDir && path.Clean(header.Name) == "." {
+			// Release builds archive their contents as "./", whose root entry
+			// is the staging directory itself.
+			continue
+		}
 		entryPath, normalizeErr := safeArchivePath(header.Name)
 		if normalizeErr != nil {
 			return ExtractionResult{}, normalizeErr

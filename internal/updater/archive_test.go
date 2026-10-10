@@ -139,3 +139,22 @@ func TestExtractTarGzHonorsExpansionLimit(t *testing.T) {
 		t.Fatal("oversized file was accepted")
 	}
 }
+
+func TestExtractTarGzAcceptsDotPrefixedReleaseLayout(t *testing.T) {
+	archive := makeTarGz(t, []archiveEntry{
+		{name: "./", typeFlag: tar.TypeDir, mode: 0755},
+		{name: "./nexus-release.json", typeFlag: tar.TypeReg, mode: 0644, data: "{}"},
+		{name: "./src/", typeFlag: tar.TypeDir, mode: 0755},
+		{name: "./src/index.js", typeFlag: tar.TypeReg, mode: 0644, data: "x"},
+	})
+	destination := filepath.Join(t.TempDir(), "stage")
+	if _, err := ExtractTarGz(bytes.NewReader(archive), destination, DefaultArchiveLimits()); err != nil {
+		t.Fatalf("release layout was rejected: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "src", "index.js")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ExtractTarGz(bytes.NewReader(makeTarGz(t, []archiveEntry{{name: ".", typeFlag: tar.TypeReg, mode: 0644}})), filepath.Join(t.TempDir(), "stage"), DefaultArchiveLimits()); err == nil {
+		t.Fatal("a regular file at the archive root was accepted")
+	}
+}

@@ -670,74 +670,137 @@ func promptInstallOptions() (updater.InstallOptions, error) {
 	fmt.Fprintln(os.Stderr, "  3. Web application with an existing remote database")
 	fmt.Fprintln(os.Stderr, "  4. Database server only")
 	fmt.Fprintln(os.Stderr, "  5. Subs worker only")
-	choice, err := readLine("Profile [1]: ")
+	profiles := map[string]updater.Profile{"1": updater.ProfileFull, "2": updater.ProfileAppWebSubsRemoteDB, "3": updater.ProfileWebOnly, "4": updater.ProfileDatabaseOnly, "5": updater.ProfileSubsOnly}
+	choice, err := ask("Profile [1]: ", false, func(value string) error {
+		if value == "" {
+			return nil
+		}
+		if _, exists := profiles[value]; !exists {
+			return errors.New("enter a number from 1 to 5")
+		}
+		return nil
+	})
 	if err != nil {
 		return updater.InstallOptions{}, err
 	}
 	if choice == "" {
 		choice = "1"
 	}
-	profiles := map[string]updater.Profile{"1": updater.ProfileFull, "2": updater.ProfileAppWebSubsRemoteDB, "3": updater.ProfileWebOnly, "4": updater.ProfileDatabaseOnly, "5": updater.ProfileSubsOnly}
-	profile, exists := profiles[choice]
-	if !exists {
-		return updater.InstallOptions{}, errors.New("profile must be between 1 and 5")
-	}
+	profile := profiles[choice]
 	options := updater.InstallOptions{Profile: profile}
 	if profile == updater.ProfileDatabaseOnly {
-		if options.DatabaseListenAddress, err = readLine("This database server's private IPv4 address: "); err != nil {
+		if options.DatabaseListenAddress, err = ask("This database server's private IPv4 address: ", false, updater.ValidatePrivateIPv4); err != nil {
 			return options, err
 		}
-		if options.ApplicationHost, err = readLine("Application server's private IPv4 address: "); err != nil {
+		if options.ApplicationHost, err = ask("Application server's private IPv4 address: ", false, func(value string) error {
+			if value == options.DatabaseListenAddress {
+				return errors.New("the application server must be a different host")
+			}
+			return updater.ValidatePrivateIPv4(value)
+		}); err != nil {
 			return options, err
 		}
 	}
 	if profile != updater.ProfileDatabaseOnly && profile != updater.ProfileSubsOnly {
-		if options.Domain, err = readLine("Domain: "); err != nil {
+		if options.Domain, err = ask("Domain: ", false, updater.ValidateDomain); err != nil {
 			return options, err
 		}
-		if options.AdminEmail, err = readLine("Administrator email: "); err != nil {
+		if options.AdminEmail, err = ask("Administrator email: ", false, updater.ValidateEmail); err != nil {
 			return options, err
 		}
-		if options.AdminPassword, err = readSecret("Administrator password: "); err != nil {
+		if options.AdminPassword, err = askNewPassword(); err != nil {
 			return options, err
 		}
-		if options.AdminNationID, err = readLine("Administrator nation ID: "); err != nil {
+		if options.AdminNationID, err = ask("Administrator nation ID: ", false, updater.ValidateNumericID); err != nil {
 			return options, err
 		}
-		if options.AllianceID, err = readLine("Alliance ID: "); err != nil {
+		if options.AllianceID, err = ask("Alliance ID: ", false, updater.ValidateNumericID); err != nil {
 			return options, err
 		}
-		if options.PWAPIKey, err = readSecret("Politics & War API key: "); err != nil {
+		if options.PWAPIKey, err = ask("Politics & War API key: ", true, updater.ValidateRequired); err != nil {
 			return options, err
 		}
-		if options.PWMutationKey, err = readSecret("Politics & War mutation key: "); err != nil {
+		if options.PWMutationKey, err = ask("Politics & War mutation key: ", true, updater.ValidateRequired); err != nil {
 			return options, err
 		}
 	}
 	if profile == updater.ProfileAppWebSubsRemoteDB || profile == updater.ProfileWebOnly {
-		if options.DatabaseHost, err = readLine("Remote database host: "); err != nil {
+		if options.DatabaseHost, err = ask("Remote database host: ", false, updater.ValidateRequired); err != nil {
 			return options, err
 		}
-		if options.DatabaseName, err = readLine("Remote database name: "); err != nil {
+		if options.DatabaseName, err = ask("Remote database name: ", false, updater.ValidateRequired); err != nil {
 			return options, err
 		}
-		if options.DatabaseUser, err = readLine("Remote database user: "); err != nil {
+		if options.DatabaseUser, err = ask("Remote database user: ", false, updater.ValidateRequired); err != nil {
 			return options, err
 		}
-		if options.DatabasePassword, err = readSecret("Remote database password: "); err != nil {
+		if options.DatabasePassword, err = ask("Remote database password: ", true, updater.ValidateRequired); err != nil {
 			return options, err
 		}
 	}
 	if profile == updater.ProfileSubsOnly {
-		if options.CoreURL, err = readLine("Nexus Subs API URL (https://your-nexus.example/api/v1/subs): "); err != nil {
+		if options.CoreURL, err = ask("Nexus Subs API URL (https://your-nexus.example/api/v1/subs): ", false, updater.ValidateHTTPSURL); err != nil {
 			return options, err
 		}
-		if options.CoreToken, err = readSecret("Nexus Core token: "); err != nil {
+		if options.CoreToken, err = ask("Nexus Core token: ", true, updater.ValidateRequired); err != nil {
 			return options, err
 		}
-		if options.PWAPIKey, err = readSecret("Politics & War API key: "); err != nil {
+		if options.PWAPIKey, err = ask("Politics & War API key: ", true, updater.ValidateRequired); err != nil {
 			return options, err
 		}
 	}
 	return options, nil
+}
+
+const maxAnswerAttempts = 5
+
+// ask prompts until the answer passes validate, explaining each rejection.
+func ask(prompt string, secret bool, validate func(string) error) (string, error) {
+	for attempt := 1; ; attempt++ {
+		var value string
+		var err error
+		if secret {
+			value, err = readSecret(prompt)
+		} else {
+			value, err = readLine(prompt)
+		}
+		if err != nil {
+			return "", err
+		}
+		validationErr := validate(value)
+		if validationErr == nil {
+			return value, nil
+		}
+		if attempt == maxAnswerAttempts {
+			return "", fmt.Errorf("%s %w", strings.TrimSpace(prompt), validationErr)
+		}
+		fmt.Fprintf(os.Stderr, "  %s. Try again.\n", capitalize(validationErr.Error()))
+	}
+}
+
+func askNewPassword() (string, error) {
+	for attempt := 1; ; attempt++ {
+		password, err := ask("Administrator password (12+ characters): ", true, updater.ValidateAdminPassword)
+		if err != nil {
+			return "", err
+		}
+		confirmation, err := readSecret("Confirm administrator password: ")
+		if err != nil {
+			return "", err
+		}
+		if confirmation == password {
+			return password, nil
+		}
+		if attempt == maxAnswerAttempts {
+			return "", errors.New("the administrator passwords did not match")
+		}
+		fmt.Fprintln(os.Stderr, "  The passwords did not match. Try again.")
+	}
+}
+
+func capitalize(value string) string {
+	if value == "" {
+		return value
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }

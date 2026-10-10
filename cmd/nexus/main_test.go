@@ -44,7 +44,7 @@ func TestInstallPromptReadsPWMutationKey(t *testing.T) {
 	previous := stdinReader
 	defer func() { stdinReader = previous }()
 	stdinReader = bufio.NewReader(strings.NewReader(strings.Join([]string{
-		"1", "nexus.example.com", "admin@example.com", "long-password", "123", "456", "api-key", "mutation-key",
+		"1", "nexus.example.com", "admin@example.com", "long-password", "long-password", "123", "456", "api-key", "mutation-key",
 	}, "\n") + "\n"))
 
 	options, err := promptInstallOptions()
@@ -79,5 +79,38 @@ func TestRollbackCommandAcceptsComponent(t *testing.T) {
 	}
 	if _, err := commandRequest([]string{"rollback", "web"}); err == nil {
 		t.Fatal("unknown component rollback was accepted")
+	}
+}
+
+func TestInstallPromptAsksAgainAfterInvalidAnswers(t *testing.T) {
+	previous := stdinReader
+	defer func() { stdinReader = previous }()
+	stdinReader = bufio.NewReader(strings.NewReader(strings.Join([]string{
+		"9", "1",
+		"https://nexus.example.com", "nexus.example.com",
+		"admin", "admin@example.com",
+		"short", "long-password", "different-password", "long-password", "long-password",
+		"Yoso", "123",
+		"456",
+		"", "api-key",
+		"mutation-key",
+	}, "\n") + "\n"))
+
+	options, err := promptInstallOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Profile != updater.ProfileFull || options.Domain != "nexus.example.com" || options.AdminEmail != "admin@example.com" ||
+		options.AdminPassword != "long-password" || options.AdminNationID != "123" || options.PWAPIKey != "api-key" {
+		t.Fatalf("unexpected options after retries: %+v", options)
+	}
+}
+
+func TestInstallPromptStopsAfterRepeatedInvalidAnswers(t *testing.T) {
+	previous := stdinReader
+	defer func() { stdinReader = previous }()
+	stdinReader = bufio.NewReader(strings.NewReader(""))
+	if _, err := promptInstallOptions(); err == nil || !strings.Contains(err.Error(), "Domain") {
+		t.Fatalf("expected the domain prompt to give up, got %v", err)
 	}
 }

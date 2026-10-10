@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -461,6 +462,59 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 	return nil
 }
 
+// The install answer checks are exported so the guided prompts can reject a
+// bad answer immediately with the same rules the installer enforces.
+
+func ValidateDomain(value string) error {
+	if !domainPattern.MatchString(value) || !strings.Contains(value, ".") || strings.Contains(value, "..") {
+		return errors.New("enter a domain name such as nexus.example.com, without https:// or a path")
+	}
+	return nil
+}
+
+func ValidateEmail(value string) error {
+	if !emailPattern.MatchString(value) {
+		return errors.New("enter an email address such as admin@example.com")
+	}
+	return nil
+}
+
+func ValidateAdminPassword(value string) error {
+	if len(value) < 12 {
+		return errors.New("the password must be at least 12 characters")
+	}
+	return nil
+}
+
+func ValidateNumericID(value string) error {
+	if !digitsPattern.MatchString(value) || strings.TrimLeft(value, "0") == "" {
+		return errors.New("enter the numeric ID only, such as 123456")
+	}
+	return nil
+}
+
+func ValidateRequired(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("a value is required")
+	}
+	return nil
+}
+
+func ValidatePrivateIPv4(value string) error {
+	if !privateIPv4(value) {
+		return errors.New("enter a private IPv4 address such as 10.0.0.4")
+	}
+	return nil
+}
+
+func ValidateHTTPSURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return errors.New("enter an https:// URL")
+	}
+	return nil
+}
+
 func validateInstallOptions(options InstallOptions) error {
 	if !validProfile(options.Profile) {
 		return errors.New("installation profile is invalid")
@@ -469,21 +523,21 @@ func validateInstallOptions(options InstallOptions) error {
 		return errors.New("release channel must be stable or beta")
 	}
 	if options.Profile == ProfileDatabaseOnly {
-		if !privateIPv4(options.DatabaseListenAddress) || !privateIPv4(options.ApplicationHost) || options.DatabaseListenAddress == options.ApplicationHost {
+		if ValidatePrivateIPv4(options.DatabaseListenAddress) != nil || ValidatePrivateIPv4(options.ApplicationHost) != nil || options.DatabaseListenAddress == options.ApplicationHost {
 			return errors.New("database-only installation requires distinct private server and application IPv4 addresses")
 		}
 		return nil
 	}
 	if options.Profile == ProfileSubsOnly {
-		if !strings.HasPrefix(options.CoreURL, "https://") || options.CoreToken == "" || options.PWAPIKey == "" {
+		if ValidateHTTPSURL(options.CoreURL) != nil || options.CoreToken == "" || options.PWAPIKey == "" {
 			return errors.New("Subs-only installation requires an HTTPS Core URL and both credentials")
 		}
 		return nil
 	}
-	if !domainPattern.MatchString(options.Domain) || !strings.Contains(options.Domain, ".") {
-		return errors.New("domain is invalid")
+	if err := ValidateDomain(options.Domain); err != nil {
+		return fmt.Errorf("domain: %w", err)
 	}
-	if !emailPattern.MatchString(options.AdminEmail) || len(options.AdminPassword) < 12 || !digitsPattern.MatchString(options.AdminNationID) || !digitsPattern.MatchString(options.AllianceID) || options.PWAPIKey == "" {
+	if ValidateEmail(options.AdminEmail) != nil || ValidateAdminPassword(options.AdminPassword) != nil || ValidateNumericID(options.AdminNationID) != nil || ValidateNumericID(options.AllianceID) != nil || options.PWAPIKey == "" {
 		return errors.New("administrator, alliance, or Politics & War configuration is invalid")
 	}
 	if options.PWMutationKey == "" {

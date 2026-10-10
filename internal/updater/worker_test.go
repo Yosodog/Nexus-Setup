@@ -15,7 +15,7 @@ func (executor *recordingExecutor) Run(_ context.Context, binary string, args []
 
 type emptyReleaseProvider struct{}
 
-func (emptyReleaseProvider) StableReleases(context.Context) ([]ReleaseInfo, error) {
+func (emptyReleaseProvider) Releases(context.Context, string, Channel) ([]ReleaseInfo, error) {
 	return []ReleaseInfo{}, nil
 }
 func (emptyReleaseProvider) Download(context.Context, string, string, string, string, int64, func(int64, int64)) error {

@@ -334,7 +334,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		return err
 	}
 	releases := NewGitHubReleaseClient()
-	available, err := releases.StableReleases(ctx)
+	available, err := releases.Releases(ctx, setupRepository, ChannelStable)
 	if err != nil || len(available) == 0 {
 		return errors.New("no stable Nexus GitHub release is available")
 	}

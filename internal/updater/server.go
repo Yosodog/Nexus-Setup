@@ -379,7 +379,7 @@ func (server *Server) checkUpdates(ctx context.Context) (UpdateData, error) {
 	if state.Profile == ProfileDatabaseOnly {
 		return UpdateData{}, errors.New("database-only hosts do not have a local Nexus application release to update")
 	}
-	releases, err := server.releases.StableReleases(ctx)
+	releases, err := server.releases.Releases(ctx, setupRepository, ChannelStable)
 	if err != nil {
 		return UpdateData{}, err
 	}

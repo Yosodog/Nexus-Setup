@@ -70,7 +70,7 @@ func (engine DeploymentEngine) update(ctx context.Context, operation OperationSt
 	if err := ensureFreeSpace(engine.Config.Paths.StateDir, minimumReleaseSpace); err != nil {
 		return err
 	}
-	releases, err := engine.Releases.StableReleases(ctx)
+	releases, err := engine.Releases.Releases(ctx, setupRepository, ChannelStable)
 	if err != nil {
 		return fmt.Errorf("discover GitHub releases: %w", err)
 	}

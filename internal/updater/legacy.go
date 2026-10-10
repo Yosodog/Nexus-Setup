@@ -200,7 +200,7 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		return err
 	}
 	releases := NewGitHubReleaseClient()
-	available, err := releases.StableReleases(ctx)
+	available, err := releases.Releases(ctx, setupRepository, ChannelStable)
 	if err != nil || !releaseExists(available, assessment.Release) {
 		return errors.New("the matching canonical Nexus-Setup release is unavailable")
 	}

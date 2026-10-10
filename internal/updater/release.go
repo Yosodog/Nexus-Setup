@@ -31,34 +31,81 @@ const (
 	maxReleaseBody    = 2 * 1024 * 1024
 )
 
+// Version is a Nexus release tag: vMAJOR.MINOR.PATCH with an optional
+// semantic-version prerelease suffix such as -beta.1 or -rc.2.
 type Version struct {
-	Major int
-	Minor int
-	Patch int
+	Major      int
+	Minor      int
+	Patch      int
+	Prerelease string
 }
 
 func ParseVersion(tag string) (Version, error) {
-	if len(tag) < 2 || tag[0] != 'v' || strings.ContainsAny(tag, "+-") {
-		return Version{}, fmt.Errorf("release tag %q is not a stable Nexus version", tag)
+	if len(tag) < 2 || tag[0] != 'v' || strings.Contains(tag, "+") {
+		return Version{}, fmt.Errorf("release tag %q is not a Nexus version", tag)
 	}
-	parts := strings.Split(tag[1:], ".")
+	core, prerelease, hasPrerelease := strings.Cut(tag[1:], "-")
+	parts := strings.Split(core, ".")
 	if len(parts) != 3 {
 		return Version{}, fmt.Errorf("release tag %q must use vMAJOR.MINOR.PATCH", tag)
 	}
 	values := make([]int, 3)
 	for index, part := range parts {
-		if part == "" || (len(part) > 1 && part[0] == '0') {
-			return Version{}, fmt.Errorf("release tag %q is invalid", tag)
-		}
-		value, err := strconv.Atoi(part)
-		if err != nil || value < 0 {
+		value, err := parseNumericIdentifier(part)
+		if err != nil {
 			return Version{}, fmt.Errorf("release tag %q is invalid", tag)
 		}
 		values[index] = value
 	}
-	return Version{Major: values[0], Minor: values[1], Patch: values[2]}, nil
+	if hasPrerelease {
+		if prerelease == "" || len(prerelease) > 64 {
+			return Version{}, fmt.Errorf("release tag %q has an invalid prerelease", tag)
+		}
+		for _, identifier := range strings.Split(prerelease, ".") {
+			if !validPrereleaseIdentifier(identifier) {
+				return Version{}, fmt.Errorf("release tag %q has an invalid prerelease", tag)
+			}
+		}
+	}
+	return Version{Major: values[0], Minor: values[1], Patch: values[2], Prerelease: prerelease}, nil
 }
 
+func parseNumericIdentifier(value string) (int, error) {
+	if value == "" || (len(value) > 1 && value[0] == '0') || len(value) > 9 {
+		return 0, errors.New("invalid numeric identifier")
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, errors.New("invalid numeric identifier")
+		}
+	}
+	return strconv.Atoi(value)
+}
+
+func validPrereleaseIdentifier(identifier string) bool {
+	if identifier == "" {
+		return false
+	}
+	numeric := true
+	for _, character := range identifier {
+		switch {
+		case character >= '0' && character <= '9':
+		case (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z'):
+			numeric = false
+		default:
+			return false
+		}
+	}
+	return !numeric || identifier == "0" || identifier[0] != '0'
+}
+
+// Stable reports whether the version has no prerelease suffix.
+func (version Version) Stable() bool {
+	return version.Prerelease == ""
+}
+
+// Compare orders versions by semantic-version precedence: a prerelease sorts
+// before the stable release with the same MAJOR.MINOR.PATCH.
 func (version Version) Compare(other Version) int {
 	if version.Major != other.Major {
 		return compareInt(version.Major, other.Major)
@@ -66,7 +113,43 @@ func (version Version) Compare(other Version) int {
 	if version.Minor != other.Minor {
 		return compareInt(version.Minor, other.Minor)
 	}
-	return compareInt(version.Patch, other.Patch)
+	if version.Patch != other.Patch {
+		return compareInt(version.Patch, other.Patch)
+	}
+	return comparePrerelease(version.Prerelease, other.Prerelease)
+}
+
+func comparePrerelease(left, right string) int {
+	if left == right {
+		return 0
+	}
+	if left == "" {
+		return 1
+	}
+	if right == "" {
+		return -1
+	}
+	leftParts := strings.Split(left, ".")
+	rightParts := strings.Split(right, ".")
+	for index := 0; index < len(leftParts) && index < len(rightParts); index++ {
+		leftNumber, leftErr := strconv.Atoi(leftParts[index])
+		rightNumber, rightErr := strconv.Atoi(rightParts[index])
+		switch {
+		case leftErr == nil && rightErr == nil:
+			if leftNumber != rightNumber {
+				return compareInt(leftNumber, rightNumber)
+			}
+		case leftErr == nil:
+			return -1
+		case rightErr == nil:
+			return 1
+		default:
+			if comparison := strings.Compare(leftParts[index], rightParts[index]); comparison != 0 {
+				return comparison
+			}
+		}
+	}
+	return compareInt(len(leftParts), len(rightParts))
 }
 
 func compareInt(left, right int) int {
@@ -79,6 +162,39 @@ func compareInt(left, right int) int {
 	return 0
 }
 
+// CompareTags compares two release tags that have already been validated.
+func CompareTags(left, right string) int {
+	leftVersion, _ := ParseVersion(left)
+	rightVersion, _ := ParseVersion(right)
+	return leftVersion.Compare(rightVersion)
+}
+
+// Channel selects which published releases a host follows.
+type Channel string
+
+const (
+	ChannelStable Channel = "stable"
+	ChannelBeta   Channel = "beta"
+)
+
+func validChannel(channel Channel) bool {
+	return channel == ChannelStable || channel == ChannelBeta
+}
+
+// releaseOnChannel reports whether a release is visible to a channel. Stable
+// hosts see only stable tags that GitHub does not mark as prereleases; beta
+// hosts see stable releases and every prerelease.
+func releaseOnChannel(tag string, githubPrerelease bool, channel Channel) bool {
+	version, err := ParseVersion(tag)
+	if err != nil {
+		return false
+	}
+	if channel == ChannelBeta {
+		return true
+	}
+	return version.Stable() && !githubPrerelease
+}
+
 type ReleaseInfo struct {
 	Tag         string    `json:"release_id"`
 	Name        string    `json:"name,omitempty"`
@@ -87,7 +203,7 @@ type ReleaseInfo struct {
 }
 
 type ReleaseProvider interface {
-	StableReleases(context.Context) ([]ReleaseInfo, error)
+	Releases(context.Context, string, Channel) ([]ReleaseInfo, error)
 	Download(context.Context, string, string, string, string, int64, func(int64, int64)) error
 }
 
@@ -119,7 +235,15 @@ func NewGitHubReleaseClient() GitHubReleaseClient {
 	}}
 }
 
-func (client GitHubReleaseClient) StableReleases(ctx context.Context) ([]ReleaseInfo, error) {
+// Releases lists the published releases of one official repository that are
+// visible on the channel, oldest first.
+func (client GitHubReleaseClient) Releases(ctx context.Context, repository string, channel Channel) ([]ReleaseInfo, error) {
+	if !validRepository(repository) {
+		return nil, errors.New("unsupported release repository")
+	}
+	if !validChannel(channel) {
+		return nil, errors.New("unsupported release channel")
+	}
 	requestContext, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	httpClient := client.Client
@@ -128,7 +252,7 @@ func (client GitHubReleaseClient) StableReleases(ctx context.Context) ([]Release
 	}
 	var releases []ReleaseInfo
 	for page := 1; page <= maxReleasePages; page++ {
-		endpoint := fmt.Sprintf("https://api.github.com/repos/Yosodog/%s/releases?per_page=100&page=%d", setupRepository, page)
+		endpoint := fmt.Sprintf("https://api.github.com/repos/Yosodog/%s/releases?per_page=100&page=%d", repository, page)
 		request, err := http.NewRequestWithContext(requestContext, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return nil, err
@@ -144,10 +268,7 @@ func (client GitHubReleaseClient) StableReleases(ctx context.Context) ([]Release
 			return nil, err
 		}
 		for _, release := range pageReleases {
-			if release.Draft || release.Prerelease {
-				continue
-			}
-			if _, err := ParseVersion(release.TagName); err != nil {
+			if release.Draft || !releaseOnChannel(release.TagName, release.Prerelease, channel) {
 				continue
 			}
 			releases = append(releases, ReleaseInfo{
@@ -159,12 +280,14 @@ func (client GitHubReleaseClient) StableReleases(ctx context.Context) ([]Release
 			break
 		}
 	}
-	sort.Slice(releases, func(left, right int) bool {
-		leftVersion, _ := ParseVersion(releases[left].Tag)
-		rightVersion, _ := ParseVersion(releases[right].Tag)
-		return leftVersion.Compare(rightVersion) < 0
-	})
+	sortReleases(releases)
 	return releases, nil
+}
+
+func sortReleases(releases []ReleaseInfo) {
+	sort.Slice(releases, func(left, right int) bool {
+		return CompareTags(releases[left].Tag, releases[right].Tag) < 0
+	})
 }
 
 func decodeGitHubReleases(response *http.Response) ([]githubRelease, error) {
@@ -316,6 +439,15 @@ func (client GitHubReleaseClient) Download(ctx context.Context, repository, tag,
 	}
 	remove = false
 	return nil
+}
+
+func validRepository(repository string) bool {
+	switch repository {
+	case setupRepository, coreRepository, subsRepository, discordRepository:
+		return true
+	default:
+		return false
+	}
 }
 
 func validRepositoryAsset(repository, asset string) bool {

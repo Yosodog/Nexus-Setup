@@ -194,11 +194,18 @@ func ConfigureHost(ctx context.Context) error {
 		return err
 	}
 	for path, content := range systemdUnits() {
+		if path == discordUnitPath && legacyDiscordUnitInstalled(discordUnitPath) {
+			// Adoption backs up the legacy bot's unit before replacing it.
+			continue
+		}
 		if err := atomicWriteBytes(path, []byte(content), 0644); err != nil {
 			return err
 		}
 	}
 	if err := runFixedCommand(ctx, "/usr/bin/systemctl", []string{"daemon-reload"}); err != nil {
+		return err
+	}
+	if err := reconcileCoreServices(ctx, "/usr/bin/systemctl", paths); err != nil {
 		return err
 	}
 	return runFixedCommand(ctx, "/usr/bin/systemctl", []string{"enable", "--now", "nexus-updater.socket"})
@@ -350,7 +357,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		versions[change.Component] = change.To
 	}
 	engine := DeploymentEngine{Config: config, Releases: releases, Executor: OSCommandExecutor{}}
-	activatedUnits := make([]string, 0, len(components)+1)
+	activatedUnits := make([]string, 0, len(components)+5)
 	coreSiteConfigured := false
 	installCompleted := false
 	defer func() {
@@ -413,10 +420,10 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 	}
 	if containsComponent(components, ComponentSubs) {
 		if options.Profile == ProfileSubsOnly {
-			if err := engine.writeStandaloneSubsConfiguration(versions[ComponentSubs], options); err != nil {
+			if err := engine.writeStandaloneSubsConfiguration(versions[ComponentSubs], options, nil); err != nil {
 				return err
 			}
-		} else if err := engine.writeComponentConfiguration(ComponentSubs, versions[ComponentSubs], nil); err != nil {
+		} else if err := engine.writeComponentConfiguration(ComponentSubs, versions[ComponentSubs], nil, nil); err != nil {
 			return err
 		}
 	}
@@ -425,17 +432,23 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		installed := containsComponent(components, component)
 		state.Components[component] = InstalledComponent{Installed: installed, Enabled: installed, CurrentRelease: versions[component]}
 	}
+	if containsComponent(components, ComponentSubs) {
+		state.SubsDelivery = SubsDeliveryHTTP
+	}
+	services := hostServicesFor(config.Paths, state)
 	for _, component := range components {
 		if err := atomicSwitchRelease(config.Paths, component, versions[component]); err != nil {
 			return err
 		}
 	}
 	for _, component := range components {
-		unit, _ := componentServiceUnit(component)
-		if err := runFixedCommand(ctx, config.SystemctlBinary, []string{"enable", "--now", unit}); err != nil {
-			return err
+		units, _ := componentEnableUnits(component, services)
+		for _, unit := range units {
+			if err := runFixedCommand(ctx, config.SystemctlBinary, []string{"enable", "--now", unit}); err != nil {
+				return err
+			}
+			activatedUnits = append(activatedUnits, unit)
 		}
-		activatedUnits = append(activatedUnits, unit)
 	}
 	if containsComponent(components, ComponentCore) {
 		if err := runFixedCommand(ctx, config.SystemctlBinary, []string{"enable", "--now", "nexus-scheduler.timer"}); err != nil {
@@ -443,7 +456,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		}
 		activatedUnits = append(activatedUnits, "nexus-scheduler.timer")
 	}
-	if err := engine.healthCheck(ctx, components, versions); err != nil {
+	if err := engine.healthCheck(ctx, components, versions, services); err != nil {
 		return err
 	}
 	if containsComponent(components, ComponentCore) {
@@ -985,7 +998,7 @@ func chownPathToGroup(path, groupName string, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
-func (engine DeploymentEngine) writeStandaloneSubsConfiguration(release string, options InstallOptions) error {
+func (engine DeploymentEngine) writeStandaloneSubsConfiguration(release string, options InstallOptions, stream *subsRedisStream) error {
 	pwPath, err := engine.writeCredential(ComponentSubs, "pw-api-token", options.PWAPIKey)
 	if err != nil {
 		return err
@@ -1005,8 +1018,11 @@ func (engine DeploymentEngine) writeStandaloneSubsConfiguration(release string, 
 		"NODE_ENV": "production", "NEXUS_RELEASE_ID": release, "BUILD_COMMIT": release,
 		"PW_API_URL": "https://api.politicsandwar.com/subscriptions/v1/subscribe", "PW_API_TOKEN_FILE": pwPath,
 		"PUSHER_SOCKET_HOST": "socket.politicsandwar.com", "PW_AUTH_URL": "https://api.politicsandwar.com/subscriptions/v1/auth",
-		"NEXUS_API_URL": options.CoreURL, "NEXUS_API_TOKEN_FILE": corePath, "DELIVERY_DRIVER": "http",
+		"NEXUS_API_URL": options.CoreURL, "NEXUS_API_TOKEN_FILE": corePath,
 		"PROCESS_HEALTH_FILE": filepath.Join(dataDirectory, "process-health.json"),
+	}
+	if err := engine.applySubsDelivery(values, stream); err != nil {
+		return err
 	}
 	directory := filepath.Join(engine.Config.Paths.NexusConfigDir, string(ComponentSubs))
 	environmentPath := filepath.Join(directory, "environment")
@@ -1017,7 +1033,7 @@ func (engine DeploymentEngine) writeStandaloneSubsConfiguration(release string, 
 }
 
 func systemdUnits() map[string]string {
-	return map[string]string{
+	units := map[string]string{
 		"/etc/tmpfiles.d/nexus-updater.conf": `d /run/nexus-updater 0750 root nexus-updater-control -
 `,
 		"/etc/systemd/system/nexus-updater.socket": `[Unit]
@@ -1102,44 +1118,6 @@ RuntimeMaxSec=2h
 MemoryMax=512M
 TasksMax=128
 LimitNOFILE=4096
-`,
-		"/etc/systemd/system/nexus-core.service": `[Unit]
-Description=Nexus Core queue worker
-After=network-online.target mysql.service
-
-[Service]
-Type=simple
-User=nexus-core
-Group=nexus-core
-WorkingDirectory=/opt/nexus/nexus-core/current
-ExecStart=/usr/bin/php /opt/nexus/nexus-core/current/artisan queue:work --sleep=3 --tries=3 --max-time=3600
-Restart=always
-RestartSec=5
-NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/nexus/nexus-core
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-RestrictNamespaces=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-LockPersonality=yes
-SystemCallArchitectures=native
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=
-AmbientCapabilities=
-MemoryMax=512M
-TasksMax=128
-LimitNOFILE=4096
-UMask=0027
-
-[Install]
-WantedBy=multi-user.target
 `,
 		"/etc/systemd/system/nexus-scheduler.service": `[Unit]
 Description=Nexus scheduler tick
@@ -1313,4 +1291,8 @@ LimitNOFILE=4096
 UMask=0077
 `,
 	}
+	for path, content := range coreServiceUnitFiles() {
+		units[path] = content
+	}
+	return units
 }

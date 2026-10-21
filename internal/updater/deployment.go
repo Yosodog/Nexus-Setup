@@ -131,6 +131,10 @@ func (engine DeploymentEngine) applyPlan(ctx context.Context, operationID string
 	previous := cloneInstallation(*installation)
 	oldVersions := installedVersions(previous)
 	running := intersectComponents(enabledComponents(previous), changed)
+	services := hostServicesFor(engine.Config.Paths, previous)
+	if err := engine.requireServiceUnits(ctx, running, services); err != nil {
+		return err
+	}
 	coreChanged := containsComponent(changed, ComponentCore)
 	coreRelease := oldVersions[ComponentCore]
 	leaveMaintenance := func(release string) error {
@@ -203,13 +207,13 @@ func (engine DeploymentEngine) applyPlan(ctx context.Context, operationID string
 	if err := engine.phase(operationID, PhaseRestarting); err != nil {
 		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
-	if err := engine.restartComponents(ctx, running); err != nil {
+	if err := engine.restartComponents(ctx, running, services); err != nil {
 		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
 	if err := engine.phase(operationID, PhaseHealthChecking); err != nil {
 		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
-	if err := engine.healthCheck(ctx, running, targets); err != nil {
+	if err := engine.healthCheck(ctx, running, targets, services); err != nil {
 		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
 	if containsComponent(running, ComponentDiscord) {
@@ -225,6 +229,7 @@ func (engine DeploymentEngine) applyPlan(ctx context.Context, operationID string
 
 func (engine DeploymentEngine) rollbackFailedPlan(ctx context.Context, installation *InstallationState, previous InstallationState, changed, running []Component, coreChanged bool) error {
 	versions := installedVersions(previous)
+	services := hostServicesFor(engine.Config.Paths, previous)
 	if err := engine.switchComponents(changed, versions); err != nil {
 		return ErrRecoveryRequired
 	}
@@ -232,10 +237,10 @@ func (engine DeploymentEngine) rollbackFailedPlan(ctx context.Context, installat
 		return ErrRecoveryRequired
 	}
 	*installation = previous
-	if err := engine.restartComponents(ctx, running); err != nil {
+	if err := engine.restartComponents(ctx, running, services); err != nil {
 		return ErrRecoveryRequired
 	}
-	if err := engine.healthCheck(ctx, running, versions); err != nil {
+	if err := engine.healthCheck(ctx, running, versions, services); err != nil {
 		return ErrRecoveryRequired
 	}
 	if containsComponent(running, ComponentDiscord) {
@@ -543,9 +548,9 @@ func (engine DeploymentEngine) switchComponents(components []Component, versions
 	return nil
 }
 
-func (engine DeploymentEngine) restartComponents(ctx context.Context, components []Component) error {
+func (engine DeploymentEngine) restartComponents(ctx context.Context, components []Component, services hostServices) error {
 	for _, component := range components {
-		units, err := componentServiceUnits(component)
+		units, err := componentServiceUnits(component, services)
 		if err != nil {
 			return err
 		}
@@ -565,12 +570,12 @@ func (engine DeploymentEngine) registerDiscordCommands(ctx context.Context) erro
 	return nil
 }
 
-func (engine DeploymentEngine) healthCheck(ctx context.Context, components []Component, versions map[Component]string) error {
+func (engine DeploymentEngine) healthCheck(ctx context.Context, components []Component, versions map[Component]string, services hostServices) error {
 	var lastError error
 	for attempt := 0; attempt < 20; attempt++ {
 		lastError = nil
 		for _, component := range components {
-			units, err := componentServiceUnits(component)
+			units, err := componentServiceUnits(component, services)
 			if err != nil {
 				return err
 			}
@@ -717,12 +722,16 @@ func (engine DeploymentEngine) rollback(ctx context.Context, operation Operation
 		targets[component] = state.Components[component].PreviousRelease
 	}
 	running := intersectComponents(enabledComponents(state), components)
+	services := hostServicesFor(engine.Config.Paths, state)
 	coreChanged := containsComponent(components, ComponentCore)
 	if err := engine.phase(operation.ID, PhaseRollingBack); err != nil {
 		return err
 	}
 	if err := checkInstalledCompatibility(engine.Config.Paths, targets); err != nil {
 		return fmt.Errorf("rollback would leave incompatible releases: %w", err)
+	}
+	if err := engine.requireServiceUnits(ctx, running, services); err != nil {
+		return err
 	}
 	if coreChanged {
 		if err := engine.runArtisan(ctx, oldVersions[ComponentCore], "down", "--retry=60"); err != nil {
@@ -753,10 +762,10 @@ func (engine DeploymentEngine) rollback(ctx context.Context, operation Operation
 		}
 		return ErrRecoveryRequired
 	}
-	if err := engine.restartComponents(ctx, running); err != nil {
+	if err := engine.restartComponents(ctx, running, services); err != nil {
 		return ErrRecoveryRequired
 	}
-	if err := engine.healthCheck(ctx, running, targets); err != nil {
+	if err := engine.healthCheck(ctx, running, targets, services); err != nil {
 		return ErrRecoveryRequired
 	}
 	if containsComponent(running, ComponentDiscord) {
@@ -843,6 +852,7 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 	if err != nil {
 		return err
 	}
+	services := hostServicesFor(engine.Config.Paths, state)
 	coreEnvironmentPath := filepath.Join(engine.Config.Paths.NexusConfigDir, string(ComponentCore), ".env")
 	coreEnvironmentBefore, err := readBoundedRegularFile(coreEnvironmentPath, 1024*1024)
 	if err != nil {
@@ -871,7 +881,7 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 		if configurationStarted {
 			_ = writeCoreEnvironmentBytes(coreEnvironmentPath, coreEnvironmentBefore)
 			if operation.Component == ComponentDiscord {
-				_ = engine.restartComponents(context.Background(), []Component{ComponentCore})
+				_ = engine.restartComponents(context.Background(), []Component{ComponentCore}, services)
 			}
 		}
 	}()
@@ -883,14 +893,14 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 		return err
 	}
 	configurationStarted = true
-	if err := engine.writeComponentConfiguration(operation.Component, release, configuration); err != nil {
+	if err := engine.writeComponentConfiguration(operation.Component, release, configuration, nil); err != nil {
 		return err
 	}
 	if operation.Component == ComponentDiscord {
-		if err := engine.restartComponents(ctx, []Component{ComponentCore}); err != nil {
+		if err := engine.restartComponents(ctx, []Component{ComponentCore}, services); err != nil {
 			return fmt.Errorf("reload Core Discord configuration: %w", err)
 		}
-		if err := engine.healthCheck(ctx, []Component{ComponentCore}, versions); err != nil {
+		if err := engine.healthCheck(ctx, []Component{ComponentCore}, versions, services); err != nil {
 			return fmt.Errorf("verify Core after Discord configuration: %w", err)
 		}
 	}
@@ -900,7 +910,7 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 	if err := engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"enable", "--now", unit}); err != nil {
 		return err
 	}
-	if err := engine.healthCheck(ctx, []Component{operation.Component}, versions); err != nil {
+	if err := engine.healthCheck(ctx, []Component{operation.Component}, versions, services); err != nil {
 		_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"disable", "--now", unit})
 		return err
 	}
@@ -910,8 +920,11 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 		}
 	}
 	state.Components[operation.Component] = InstalledComponent{Installed: true, Enabled: true, CurrentRelease: release}
-	if operation.Component == ComponentSubs && state.Profile == ProfileWebOnly {
-		state.Profile = ProfileAppWebSubsRemoteDB
+	if operation.Component == ComponentSubs {
+		state.SubsDelivery = SubsDeliveryHTTP
+		if state.Profile == ProfileWebOnly {
+			state.Profile = ProfileAppWebSubsRemoteDB
+		}
 	}
 	if err := SaveInstallation(engine.Config.Paths, state); err != nil {
 		return err
@@ -947,7 +960,9 @@ func validateInstallConfiguration(component Component, configuration map[string]
 	}
 }
 
-func (engine DeploymentEngine) writeComponentConfiguration(component Component, release string, configuration map[string]string) error {
+// writeComponentConfiguration writes a local component's environment. Subs
+// delivers to Core over HTTP unless stream preserves an adopted Redis Stream.
+func (engine DeploymentEngine) writeComponentConfiguration(component Component, release string, configuration map[string]string, stream *subsRedisStream) error {
 	componentConfig := filepath.Join(engine.Config.Paths.NexusConfigDir, string(component))
 	if err := os.MkdirAll(componentConfig, 0750); err != nil {
 		return err
@@ -989,8 +1004,10 @@ func (engine DeploymentEngine) writeComponentConfiguration(component Component, 
 		environment["PW_AUTH_URL"] = "https://api.politicsandwar.com/subscriptions/v1/auth"
 		environment["NEXUS_API_URL"] = strings.TrimRight(appURL, "/") + "/api/v1/subs"
 		environment["NEXUS_API_TOKEN_FILE"] = nexusPath
-		environment["DELIVERY_DRIVER"] = "http"
 		environment["PROCESS_HEALTH_FILE"] = filepath.Join(dataDirectory, "process-health.json")
+		if err := engine.applySubsDelivery(environment, stream); err != nil {
+			return err
+		}
 	case ComponentDiscord:
 		nexusToken, err := ensureCoreSecret(coreEnv, "DISCORD_BOT_KEY")
 		if err != nil {
@@ -1340,7 +1357,7 @@ func (engine DeploymentEngine) setComponentEnabled(ctx context.Context, operatio
 		return err
 	}
 	if enabled {
-		if err := engine.healthCheck(ctx, []Component{operation.Component}, installedVersions(state)); err != nil {
+		if err := engine.healthCheck(ctx, []Component{operation.Component}, installedVersions(state), hostServicesFor(engine.Config.Paths, state)); err != nil {
 			_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"disable", "--now", unit})
 			return err
 		}
@@ -1390,10 +1407,14 @@ func (engine DeploymentEngine) restartComponent(ctx context.Context, component C
 	if !state.Components[component].Enabled {
 		return errors.New("component is disabled; enable it before restarting")
 	}
-	if err := engine.restartComponents(ctx, []Component{component}); err != nil {
+	services := hostServicesFor(engine.Config.Paths, state)
+	if err := engine.requireServiceUnits(ctx, []Component{component}, services); err != nil {
 		return err
 	}
-	return engine.healthCheck(ctx, []Component{component}, installedVersions(state))
+	if err := engine.restartComponents(ctx, []Component{component}, services); err != nil {
+		return err
+	}
+	return engine.healthCheck(ctx, []Component{component}, installedVersions(state), services)
 }
 
 func (engine DeploymentEngine) phase(operationID string, phase OperationPhase) error {

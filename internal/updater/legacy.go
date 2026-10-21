@@ -17,8 +17,12 @@ import (
 )
 
 const (
-	legacyCorePath = "/var/www/nexus"
-	legacySubsPath = "/var/nexus-subs"
+	legacyCorePath         = "/var/www/nexus"
+	legacySubsPath         = "/var/nexus-subs"
+	legacyDiscordPath      = "/opt/nexus-ams-discord"
+	legacySupervisorConfig = "/etc/supervisor/conf.d"
+	discordUnitPath        = "/etc/systemd/system/nexus-discord.service"
+	legacyDisabledSuffix   = ".nexus-disabled"
 )
 
 var legacyPHPSocketPattern = regexp.MustCompile(`unix:/run/php/php[0-9]+\.[0-9]+-fpm\.sock`)
@@ -39,8 +43,15 @@ func AssessLegacyInstallation(ctx context.Context) (LegacyAssessment, error) {
 	if err != nil {
 		return LegacyAssessment{Detected: coreExists || pathExists(legacySubsPath)}, err
 	}
-	if !coreExists && !subsExists {
+	discordExists, discordRelease, err := inspectLegacyRepository(ctx, legacyDiscordPath, discordRepository)
+	if err != nil {
+		return LegacyAssessment{Detected: coreExists || subsExists || pathExists(legacyDiscordPath)}, err
+	}
+	if !coreExists && !subsExists && !discordExists {
 		return LegacyAssessment{}, nil
+	}
+	if discordExists && !coreExists {
+		return LegacyAssessment{Detected: true}, errors.New("legacy Discord can only be adopted together with legacy Core on the same host")
 	}
 	assessment := LegacyAssessment{Detected: true, Releases: map[Component]string{}}
 	if coreExists {
@@ -50,6 +61,10 @@ func AssessLegacyInstallation(ctx context.Context) (LegacyAssessment, error) {
 	if subsExists {
 		assessment.Releases[ComponentSubs] = subsRelease
 		assessment.Components = append(assessment.Components, ComponentSubs)
+	}
+	if discordExists {
+		assessment.Releases[ComponentDiscord] = discordRelease
+		assessment.Components = append(assessment.Components, ComponentDiscord)
 	}
 
 	switch {
@@ -110,10 +125,10 @@ func inspectLegacyRepository(ctx context.Context, path, repository string) (bool
 	if _, err := ParseVersion(tag); err != nil {
 		return false, "", fmt.Errorf("legacy path %s has an unsupported release tag", path)
 	}
-	if repository == coreRepository {
+	if repository == coreRepository || repository == discordRepository {
 		environment, statErr := os.Lstat(filepath.Join(path, ".env"))
 		if statErr != nil || !environment.Mode().IsRegular() || environment.Mode()&os.ModeSymlink != 0 {
-			return false, "", errors.New("legacy Core environment file is unavailable")
+			return false, "", fmt.Errorf("legacy environment file %s/.env is unavailable", path)
 		}
 	}
 	return true, tag, nil
@@ -128,7 +143,7 @@ func officialLegacyOrigin(origin, repository string) bool {
 }
 
 func runGitOutput(ctx context.Context, directory string, arguments ...string) (string, error) {
-	if directory != legacyCorePath && directory != legacySubsPath {
+	if directory != legacyCorePath && directory != legacySubsPath && directory != legacyDiscordPath {
 		return "", errors.New("legacy repository path is not allowlisted")
 	}
 	commandArguments := append([]string{"-C", directory}, arguments...)
@@ -188,6 +203,37 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 	if err := ensureFreeSpace(config.Paths.StateDir, minimumReleaseSpace); err != nil {
 		return err
 	}
+	adoptsCore := containsComponent(assessment.Components, ComponentCore)
+	adoptsSubs := containsComponent(assessment.Components, ComponentSubs)
+	adoptsDiscord := containsComponent(assessment.Components, ComponentDiscord)
+	var subsStream *subsRedisStream
+	if adoptsSubs {
+		subsStream, err = legacySubsRedisStream(filepath.Join(legacySubsPath, ".env"), legacySubsPath)
+		if err != nil {
+			return err
+		}
+		if subsStream != nil && adoptsCore {
+			if err := checkCoreSubsStream(filepath.Join(legacyCorePath, ".env"), *subsStream); err != nil {
+				return err
+			}
+		}
+	}
+	var discord legacyDiscordConfiguration
+	if adoptsDiscord {
+		discord, err = readLegacyDiscordConfiguration(filepath.Join(legacyDiscordPath, ".env"), legacyDiscordPath)
+		if err != nil {
+			return err
+		}
+	}
+	supervisorConfigs, err := findLegacySupervisorConfigs(legacySupervisorConfig)
+	if err != nil {
+		return err
+	}
+	for _, program := range supervisorConfigs {
+		if pathExists(program.Path + legacyDisabledSuffix) {
+			return fmt.Errorf("legacy Supervisor backup already exists for %s", filepath.Base(program.Path))
+		}
+	}
 	platform, err := DetectPlatform()
 	if err != nil {
 		return err
@@ -222,9 +268,22 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		}
 	}
 
+	state := InstallationState{Profile: assessment.Profile, Channel: channel, Components: map[Component]InstalledComponent{}}
+	for _, component := range []Component{ComponentCore, ComponentSubs, ComponentDiscord} {
+		installed := containsComponent(assessment.Components, component)
+		state.Components[component] = InstalledComponent{Installed: installed, Enabled: installed, CurrentRelease: versions[component]}
+	}
+	if adoptsSubs {
+		state.SubsDelivery = SubsDeliveryHTTP
+		if subsStream != nil {
+			state.SubsDelivery = SubsDeliveryRedisStream
+		}
+	}
+
 	activatedUnits := []string{}
 	disabledSupervisorConfigs := []string{}
 	legacyStopped := false
+	legacyDiscord := legacyDiscordService{}
 	nginxBackup := []byte(nil)
 	nginxMode := os.FileMode(0644)
 	nginxChanged := false
@@ -251,7 +310,7 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		}
 		for index := len(disabledSupervisorConfigs) - 1; index >= 0; index-- {
 			disabled := disabledSupervisorConfigs[index]
-			_ = os.Rename(disabled, strings.TrimSuffix(disabled, ".nexus-disabled"))
+			_ = os.Rename(disabled, strings.TrimSuffix(disabled, legacyDisabledSuffix))
 		}
 		if len(disabledSupervisorConfigs) > 0 && pathExists("/usr/bin/supervisorctl") {
 			_ = runFixedCommand(context.Background(), "/usr/bin/supervisorctl", []string{"reread"})
@@ -263,27 +322,35 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 			_ = runFixedCommand(context.Background(), config.SystemctlBinary, []string{"reload", "nginx.service"})
 		}
 		if legacyStopped {
-			startLegacySupervisor(context.Background())
+			startLegacySupervisor(context.Background(), supervisorConfigs)
 		}
+		legacyDiscord.restore(context.Background(), config.SystemctlBinary)
 		if legacyMaintenance {
 			_ = runLegacyArtisan(context.Background(), "up")
 		}
 		_ = os.Remove(filepath.Join(config.Paths.NexusConfigDir, string(ComponentCore), ".env"))
 		_ = os.Remove(filepath.Join(config.Paths.NexusConfigDir, string(ComponentSubs), "environment"))
 		_ = os.RemoveAll(filepath.Join(config.Paths.CredentialDir, string(ComponentSubs)))
+		_ = os.Remove(filepath.Join(config.Paths.NexusConfigDir, string(ComponentDiscord), "environment"))
+		_ = os.RemoveAll(filepath.Join(config.Paths.CredentialDir, string(ComponentDiscord)))
 		_ = os.RemoveAll(filepath.Join(config.Paths.DataDir, string(ComponentCore), "storage"))
 	}()
 
-	if containsComponent(assessment.Components, ComponentCore) {
+	if adoptsCore {
 		if err := runLegacyArtisan(ctx, "down", "--retry=60"); err != nil {
 			return fmt.Errorf("put legacy Core in maintenance mode: %w", err)
 		}
 		legacyMaintenance = true
 	}
-	stopLegacySupervisor(ctx)
+	stopLegacySupervisor(ctx, supervisorConfigs)
 	legacyStopped = true
+	if adoptsDiscord {
+		if err := legacyDiscord.replace(ctx, config.SystemctlBinary); err != nil {
+			return fmt.Errorf("replace the legacy Discord service: %w", err)
+		}
+	}
 
-	if containsComponent(assessment.Components, ComponentCore) {
+	if adoptsCore {
 		if err := copyLegacyCoreState(config.Paths); err != nil {
 			return err
 		}
@@ -300,16 +367,21 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 			return fmt.Errorf("leave managed Core maintenance mode: %w", err)
 		}
 	}
-	if containsComponent(assessment.Components, ComponentSubs) {
+	if adoptsSubs {
 		if assessment.Profile == ProfileSubsOnly {
 			options, optionsErr := legacySubsOptions()
 			if optionsErr != nil {
 				return optionsErr
 			}
-			if err := engine.writeStandaloneSubsConfiguration(versions[ComponentSubs], options); err != nil {
+			if err := engine.writeStandaloneSubsConfiguration(versions[ComponentSubs], options, subsStream); err != nil {
 				return err
 			}
-		} else if err := engine.writeComponentConfiguration(ComponentSubs, versions[ComponentSubs], nil); err != nil {
+		} else if err := engine.writeComponentConfiguration(ComponentSubs, versions[ComponentSubs], nil, subsStream); err != nil {
+			return err
+		}
+	}
+	if adoptsDiscord {
+		if err := engine.writeLegacyDiscordConfiguration(versions[ComponentDiscord], discord); err != nil {
 			return err
 		}
 	}
@@ -319,34 +391,42 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		}
 	}
 
+	services := hostServicesFor(config.Paths, state)
 	for _, component := range assessment.Components {
-		unit, unitErr := componentServiceUnit(component)
+		units, unitErr := componentEnableUnits(component, services)
 		if unitErr != nil {
 			return unitErr
 		}
-		if err := runFixedCommand(ctx, config.SystemctlBinary, []string{"enable", "--now", unit}); err != nil {
-			return err
+		for _, unit := range units {
+			if err := runFixedCommand(ctx, config.SystemctlBinary, []string{"enable", "--now", unit}); err != nil {
+				return err
+			}
+			activatedUnits = append(activatedUnits, unit)
 		}
-		activatedUnits = append(activatedUnits, unit)
 	}
-	if containsComponent(assessment.Components, ComponentCore) {
+	if adoptsCore {
 		if err := runFixedCommand(ctx, config.SystemctlBinary, []string{"enable", "--now", "nexus-scheduler.timer"}); err != nil {
 			return err
 		}
 		activatedUnits = append(activatedUnits, "nexus-scheduler.timer")
 	}
-	if err := engine.healthCheck(ctx, assessment.Components, versions); err != nil {
+	if err := engine.healthCheck(ctx, assessment.Components, versions, services); err != nil {
 		return err
 	}
+	if adoptsDiscord {
+		if err := engine.registerDiscordCommands(ctx); err != nil {
+			return err
+		}
+	}
 
-	if containsComponent(assessment.Components, ComponentCore) {
+	if adoptsCore {
 		nginxBackup, nginxMode, err = switchLegacyNginx(ctx, config)
 		if err != nil {
 			return err
 		}
 		nginxChanged = true
 	}
-	disabledSupervisorConfigs, err = disableLegacySupervisor(ctx)
+	disabledSupervisorConfigs, err = disableLegacySupervisor(ctx, supervisorConfigs)
 	if err != nil {
 		return err
 	}
@@ -355,11 +435,6 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		return err
 	}
 
-	state := InstallationState{Profile: assessment.Profile, Channel: channel, Components: map[Component]InstalledComponent{}}
-	for _, component := range []Component{ComponentCore, ComponentSubs, ComponentDiscord} {
-		installed := containsComponent(assessment.Components, component)
-		state.Components[component] = InstalledComponent{Installed: installed, Enabled: installed, CurrentRelease: versions[component]}
-	}
 	if err := updateInstalledProfile(config.Paths, assessment.Profile); err != nil {
 		return err
 	}
@@ -389,6 +464,13 @@ func assertLegacyAdoptionTargetsAvailable(paths Paths, components []Component) e
 		targets = append(targets,
 			filepath.Join(paths.NexusConfigDir, string(ComponentSubs), "environment"),
 			filepath.Join(paths.CredentialDir, string(ComponentSubs)),
+		)
+	}
+	if containsComponent(components, ComponentDiscord) {
+		targets = append(targets,
+			filepath.Join(paths.NexusConfigDir, string(ComponentDiscord), "environment"),
+			filepath.Join(paths.CredentialDir, string(ComponentDiscord)),
+			discordUnitPath+legacyDisabledSuffix,
 		)
 	}
 	for _, component := range components {
@@ -513,24 +595,6 @@ func legacySubsOptions() (InstallOptions, error) {
 	return InstallOptions{Profile: ProfileSubsOnly, CoreURL: coreURL, CoreToken: coreToken, PWAPIKey: pwToken}, nil
 }
 
-func stopLegacySupervisor(ctx context.Context) {
-	if !pathExists("/usr/bin/supervisorctl") {
-		return
-	}
-	for _, program := range []string{"nexus-worker:*", "nexus-worker-sync:*", "nexus-pulse-check:*", "nexus-pulse-work:*", "nexus-subs-stream", "nexus-subs:*"} {
-		_ = runFixedCommand(ctx, "/usr/bin/supervisorctl", []string{"stop", program})
-	}
-}
-
-func startLegacySupervisor(ctx context.Context) {
-	if !pathExists("/usr/bin/supervisorctl") {
-		return
-	}
-	for _, program := range []string{"nexus-worker:*", "nexus-worker-sync:*", "nexus-pulse-check:*", "nexus-pulse-work:*", "nexus-subs-stream", "nexus-subs:*"} {
-		_ = runFixedCommand(ctx, "/usr/bin/supervisorctl", []string{"start", program})
-	}
-}
-
 func switchLegacyNginx(ctx context.Context, config Config) ([]byte, os.FileMode, error) {
 	path := "/etc/nginx/sites-available/nexus.conf"
 	info, err := os.Lstat(path)
@@ -568,25 +632,165 @@ func rewriteLegacyNginx(contents []byte) ([]byte, error) {
 	return updated, nil
 }
 
-func disableLegacySupervisor(ctx context.Context) ([]string, error) {
-	paths := []string{
-		"/etc/supervisor/conf.d/nexus-worker.conf",
-		"/etc/supervisor/conf.d/nexus-worker-sync.conf",
-		"/etc/supervisor/conf.d/nexus-pulse-check.conf",
-		"/etc/supervisor/conf.d/nexus-pulse-work.conf",
-		"/etc/supervisor/conf.d/nexus-subs-stream.conf",
-		"/etc/supervisor/conf.d/nexus-subs.conf",
+// legacySupervisorProgram is a Supervisor configuration file that runs part
+// of a legacy checkout, with the supervisorctl names of everything it defines.
+type legacySupervisorProgram struct {
+	Path    string
+	Targets []string
+}
+
+var supervisorNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+
+// findLegacySupervisorConfigs returns every Supervisor configuration with a
+// program whose directory, or command, is inside a legacy checkout. Programs
+// are discovered rather than listed so a renamed or extra worker is never left
+// running next to the managed services.
+func findLegacySupervisorConfigs(directory string) ([]legacySupervisorProgram, error) {
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
 	}
-	disabled := []string{}
-	for _, path := range paths {
-		if !pathExists(path) {
+	if err != nil {
+		return nil, fmt.Errorf("inspect legacy Supervisor configuration: %w", err)
+	}
+	configs := []legacySupervisorProgram{}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".conf") {
 			continue
 		}
-		target := path + ".nexus-disabled"
-		if pathExists(target) {
-			return disabled, fmt.Errorf("legacy Supervisor backup already exists for %s", filepath.Base(path))
+		path := filepath.Join(directory, entry.Name())
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 1024*1024 {
+			return nil, fmt.Errorf("legacy Supervisor configuration %s is unsafe or unreadable", entry.Name())
 		}
-		if err := os.Rename(path, target); err != nil {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("legacy Supervisor configuration %s is unreadable", entry.Name())
+		}
+		targets, matched, err := parseLegacySupervisorConfig(contents)
+		if err != nil {
+			return nil, fmt.Errorf("legacy Supervisor configuration %s: %w", entry.Name(), err)
+		}
+		if matched {
+			configs = append(configs, legacySupervisorProgram{Path: path, Targets: targets})
+		}
+	}
+	return configs, nil
+}
+
+// parseLegacySupervisorConfig reports whether a configuration runs a legacy
+// checkout and, if so, the supervisorctl targets for all of its programs.
+// Disabling the file removes every program in it, so every one is stopped and
+// later restored together.
+func parseLegacySupervisorConfig(contents []byte) ([]string, bool, error) {
+	type section struct {
+		kind, name, directory, command string
+		programs                       []string
+	}
+	sections := []*section{}
+	var current *section
+	for _, raw := range strings.Split(strings.ReplaceAll(string(contents), "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || line[0] == ';' || line[0] == '#' {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			kind, name, _ := strings.Cut(strings.TrimSpace(line[1:len(line)-1]), ":")
+			current = &section{kind: strings.TrimSpace(kind), name: strings.TrimSpace(name)}
+			sections = append(sections, current)
+			continue
+		}
+		key, value, found := strings.Cut(line, "=")
+		if current == nil || !found {
+			continue
+		}
+		if index := strings.Index(value, " ;"); index >= 0 {
+			value = value[:index]
+		}
+		value = strings.TrimSpace(value)
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "directory":
+			current.directory = value
+		case "command":
+			current.command = value
+		case "programs":
+			for _, program := range strings.Split(value, ",") {
+				if program = strings.TrimSpace(program); program != "" {
+					current.programs = append(current.programs, program)
+				}
+			}
+		}
+	}
+	matched := false
+	grouped := map[string]bool{}
+	for _, section := range sections {
+		if section.kind == "program" && legacySupervisorProgramMatches(section.directory, section.command) {
+			matched = true
+		}
+		if section.kind == "group" {
+			for _, program := range section.programs {
+				grouped[program] = true
+			}
+		}
+	}
+	if !matched {
+		return nil, false, nil
+	}
+	targets := []string{}
+	for _, section := range sections {
+		if (section.kind != "program" && section.kind != "group") || (section.kind == "program" && grouped[section.name]) {
+			continue
+		}
+		if !supervisorNamePattern.MatchString(section.name) {
+			return nil, true, fmt.Errorf("Supervisor %s name %q is not supported", section.kind, section.name)
+		}
+		targets = append(targets, section.name+":*")
+	}
+	return targets, true, nil
+}
+
+func legacySupervisorProgramMatches(directory, command string) bool {
+	for _, root := range []string{legacyCorePath, legacySubsPath, legacyDiscordPath} {
+		if directory != "" && filepath.Clean(directory) == root {
+			return true
+		}
+		if strings.Contains(command, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func stopLegacySupervisor(ctx context.Context, configs []legacySupervisorProgram) {
+	controlLegacySupervisor(ctx, configs, "stop")
+}
+
+func startLegacySupervisor(ctx context.Context, configs []legacySupervisorProgram) {
+	controlLegacySupervisor(ctx, configs, "start")
+}
+
+func controlLegacySupervisor(ctx context.Context, configs []legacySupervisorProgram, action string) {
+	if !pathExists("/usr/bin/supervisorctl") {
+		return
+	}
+	for _, config := range configs {
+		for _, target := range config.Targets {
+			_ = runFixedCommand(ctx, "/usr/bin/supervisorctl", []string{action, target})
+		}
+	}
+}
+
+func disableLegacySupervisor(ctx context.Context, configs []legacySupervisorProgram) ([]string, error) {
+	disabled := []string{}
+	for _, config := range configs {
+		if !pathExists(config.Path) {
+			continue
+		}
+		target := config.Path + legacyDisabledSuffix
+		if pathExists(target) {
+			return disabled, fmt.Errorf("legacy Supervisor backup already exists for %s", filepath.Base(config.Path))
+		}
+		if err := os.Rename(config.Path, target); err != nil {
 			return disabled, err
 		}
 		disabled = append(disabled, target)
@@ -667,4 +871,285 @@ func readBoundedRegularFile(path string, maximum int64) ([]byte, error) {
 		return nil, errors.New("file is too large")
 	}
 	return contents, nil
+}
+
+// readLegacySecret reads a secret from a legacy .env, either inline or from
+// the file its *_FILE key names. A relative file is resolved against the
+// checkout, which was the legacy process's working directory.
+func readLegacySecret(environmentPath, checkout, key string) (string, error) {
+	value, err := readEnvValue(environmentPath, key+"_FILE")
+	if err != nil {
+		return "", err
+	}
+	if value = strings.TrimSpace(value); value != "" {
+		if !filepath.IsAbs(value) {
+			value = filepath.Join(checkout, value)
+		}
+		contents, readErr := readBoundedRegularFile(value, 64*1024)
+		if readErr != nil {
+			return "", fmt.Errorf("legacy %s file is unreadable", key)
+		}
+		return strings.TrimSpace(string(contents)), nil
+	}
+	value, err = readEnvValue(environmentPath, key)
+	return strings.TrimSpace(value), err
+}
+
+// legacySubsRedisStream returns the legacy Subs Redis Stream delivery, or nil
+// when Subs delivers to Core over HTTP.
+func legacySubsRedisStream(environmentPath, checkout string) (*subsRedisStream, error) {
+	driver, err := readEnvValue(environmentPath, "DELIVERY_DRIVER")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errors.New("legacy Subs environment file is unreadable")
+	}
+	switch SubsDelivery(strings.ToLower(strings.TrimSpace(driver))) {
+	case "", SubsDeliveryHTTP:
+		return nil, nil
+	case SubsDeliveryRedisStream:
+	default:
+		return nil, errors.New("legacy Subs DELIVERY_DRIVER must be http or redis-stream")
+	}
+	stream := subsRedisStream{}
+	stream.URL, _ = readEnvValue(environmentPath, "SUBS_REDIS_URL")
+	stream.Stream, _ = readEnvValue(environmentPath, "SUBS_REDIS_STREAM")
+	if stream.Stream = strings.TrimSpace(stream.Stream); stream.Stream == "" {
+		stream.Stream = defaultSubsRedisStream
+	}
+	stream.URL = strings.TrimSpace(stream.URL)
+	stream.HMACSecret, err = readLegacySecret(environmentPath, checkout, "SUBS_REDIS_HMAC_SECRET")
+	if err != nil {
+		return nil, err
+	}
+	if err := stream.validate(); err != nil {
+		return nil, fmt.Errorf("legacy Subs Redis Stream delivery: %w", err)
+	}
+	return &stream, nil
+}
+
+// checkCoreSubsStream confirms the adopted Core can verify and read what Subs
+// will publish. Core keeps its own copy of these settings in its .env.
+func checkCoreSubsStream(coreEnvironment string, stream subsRedisStream) error {
+	secret, err := readEnvValue(coreEnvironment, "SUBS_REDIS_HMAC_SECRET")
+	if err != nil || strings.TrimSpace(secret) == "" {
+		return errors.New("legacy Subs uses Redis Stream delivery but legacy Core has no SUBS_REDIS_HMAC_SECRET")
+	}
+	if strings.TrimSpace(secret) != stream.HMACSecret {
+		return errors.New("legacy Core and Subs SUBS_REDIS_HMAC_SECRET values differ")
+	}
+	coreStream, _ := readEnvValue(coreEnvironment, "SUBS_REDIS_STREAM")
+	if coreStream = strings.TrimSpace(coreStream); coreStream == "" {
+		coreStream = defaultSubsRedisStream
+	}
+	if coreStream != stream.Stream {
+		return errors.New("legacy Core and Subs SUBS_REDIS_STREAM values differ")
+	}
+	return nil
+}
+
+// legacyDiscordConfiguration is the managed Discord configuration built from
+// a legacy bot's .env. Its relay identity is kept exactly; a new one would no
+// longer match the identity Core already trusts.
+type legacyDiscordConfiguration struct {
+	environment map[string]string
+	credentials []legacyDiscordCredential
+}
+
+type legacyDiscordCredential struct {
+	key, name, value string
+}
+
+// legacyDiscordSettings are copied unchanged when the legacy .env sets them.
+var legacyDiscordSettings = []string{
+	"BOT_DEPLOYMENT_MODE",
+	"DISCORD_CLIENT_ID",
+	"DISCORD_GUILD_ID",
+	"DISCORD_GUILD_MEMBERS_INTENT",
+	"DISCORD_MESSAGE_CONTENT_INTENT",
+	"DISCORD_CONNECTIONS_FILE",
+	"DISCORD_CONNECTIONS_JSON",
+	"DISCORD_CONNECTION_REFRESH_MS",
+	"DISCORD_SCHEDULER_QUANTUM",
+	"DISCORD_SHARD_COUNT",
+	"NEXUS_API_URL",
+	"NEXUS_DISCORD_CONNECTION_ID",
+	"NEXUS_DISCORD_CONNECTION_GENERATION",
+	"NEXUS_DISCORD_RELAY_PROTOCOL",
+	"NEXUS_DISCORD_RELAY_KEY_ID",
+	"NEXUS_DISCORD_RELAY_CURRENT_KEY_ID",
+	"NEXUS_DISCORD_RELAY_NEXT_KEY_ID",
+	"NEXUS_DISCORD_CAPABILITIES_JSON",
+	"LOG_LEVEL",
+	"PROCESS_HEALTH_INTERVAL_MS",
+	"PROCESS_HEALTH_STALE_AFTER_MS",
+}
+
+func readLegacyDiscordConfiguration(environmentPath, checkout string) (legacyDiscordConfiguration, error) {
+	configuration := legacyDiscordConfiguration{environment: map[string]string{}}
+	for _, key := range legacyDiscordSettings {
+		value, err := readEnvValue(environmentPath, key)
+		if err != nil {
+			return configuration, errors.New("legacy Discord environment file is unreadable")
+		}
+		if value = strings.TrimSpace(value); value != "" {
+			configuration.environment[key] = value
+		}
+	}
+	if configuration.environment["BOT_DEPLOYMENT_MODE"] == "" {
+		mode, _ := readEnvValue(environmentPath, "DISCORD_DEPLOYMENT_MODE")
+		if mode = strings.TrimSpace(mode); mode == "" {
+			mode = "dedicated"
+		}
+		configuration.environment["BOT_DEPLOYMENT_MODE"] = mode
+	}
+	if file := configuration.environment["DISCORD_CONNECTIONS_FILE"]; file != "" && !filepath.IsAbs(file) {
+		configuration.environment["DISCORD_CONNECTIONS_FILE"] = filepath.Join(checkout, file)
+	}
+	for _, credential := range []struct {
+		key, name string
+		required  bool
+	}{
+		{"DISCORD_BOT_TOKEN", "bot-token", true},
+		{"NEXUS_API_KEY", "nexus-api-token", true},
+		{"NEXUS_DISCORD_RELAY_PRIVATE_KEY", "relay-private-key", true},
+		{"NEXUS_DISCORD_RELAY_NEXT_PRIVATE_KEY", "relay-next-private-key", false},
+	} {
+		value, err := readLegacySecret(environmentPath, checkout, credential.key)
+		if err != nil {
+			return configuration, err
+		}
+		if value == "" {
+			if credential.required {
+				return configuration, fmt.Errorf("legacy Discord %s is not configured", credential.key)
+			}
+			continue
+		}
+		configuration.credentials = append(configuration.credentials, legacyDiscordCredential{key: credential.key, name: credential.name, value: value})
+	}
+	if configuration.environment["NEXUS_API_URL"] == "" {
+		return configuration, errors.New("legacy Discord NEXUS_API_URL is not configured")
+	}
+	if err := validateInstallConfiguration(ComponentDiscord, map[string]string{
+		"bot_token": configuration.credentials[0].value,
+		"client_id": configuration.environment["DISCORD_CLIENT_ID"],
+		"guild_id":  configuration.environment["DISCORD_GUILD_ID"],
+	}); err != nil {
+		return configuration, fmt.Errorf("legacy %w", err)
+	}
+	return configuration, nil
+}
+
+// writeLegacyDiscordConfiguration writes the managed Discord environment and
+// credential files. Unlike a new install it leaves Core's DISCORD_* settings
+// alone, because the adopted bot keeps the relay identity Core expects.
+func (engine DeploymentEngine) writeLegacyDiscordConfiguration(release string, configuration legacyDiscordConfiguration) error {
+	componentConfig := filepath.Join(engine.Config.Paths.NexusConfigDir, string(ComponentDiscord))
+	if err := os.MkdirAll(componentConfig, 0750); err != nil {
+		return err
+	}
+	dataDirectory := filepath.Join(engine.Config.Paths.DataDir, string(ComponentDiscord))
+	if err := os.MkdirAll(dataDirectory, 0750); err != nil {
+		return err
+	}
+	if err := chownPathToGroup(dataDirectory, string(ComponentDiscord), 0770); err != nil {
+		return err
+	}
+	environment := map[string]string{}
+	for key, value := range configuration.environment {
+		environment[key] = value
+	}
+	for _, credential := range configuration.credentials {
+		path, err := engine.writeCredential(ComponentDiscord, credential.name, credential.value)
+		if err != nil {
+			return err
+		}
+		environment[credential.key+"_FILE"] = path
+	}
+	environment["NODE_ENV"] = "production"
+	environment["NEXUS_RELEASE_ID"] = release
+	environment["BUILD_COMMIT"] = release
+	environment["PROCESS_HEALTH_FILE"] = filepath.Join(dataDirectory, "process-health.json")
+	environmentPath := filepath.Join(componentConfig, "environment")
+	if err := writeEnvironmentFile(environmentPath, environment); err != nil {
+		return err
+	}
+	return chownPathToGroup(environmentPath, string(ComponentDiscord), 0640)
+}
+
+// legacyDiscordUnitInstalled reports whether the Discord unit path holds a
+// legacy bot's unit rather than the managed one. The managed unit is always a
+// regular file that runs the managed release.
+func legacyDiscordUnitInstalled(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	if !info.Mode().IsRegular() {
+		return true
+	}
+	contents, err := readBoundedRegularFile(path, 1024*1024)
+	return err != nil || !bytes.Contains(contents, []byte("/opt/nexus/nexus-discord/current"))
+}
+
+// legacyDiscordService stops a legacy bot that shares the managed unit name
+// and moves its unit aside, remembering enough to put it back.
+type legacyDiscordService struct {
+	stopped     bool
+	wasActive   bool
+	wasEnabled  bool
+	unitMoved   bool
+	unitWritten bool
+}
+
+func (service *legacyDiscordService) replace(ctx context.Context, systemctl string) error {
+	unit := filepath.Base(discordUnitPath)
+	service.wasActive = runFixedCommand(ctx, systemctl, []string{"is-active", "--quiet", unit}) == nil
+	service.wasEnabled = runFixedCommand(ctx, systemctl, []string{"is-enabled", "--quiet", unit}) == nil
+	service.stopped = true
+	if service.wasActive {
+		if err := runFixedCommand(ctx, systemctl, []string{"stop", unit}); err != nil {
+			return err
+		}
+	}
+	if service.wasEnabled {
+		if err := runFixedCommand(ctx, systemctl, []string{"disable", unit}); err != nil {
+			return err
+		}
+	}
+	if legacyDiscordUnitInstalled(discordUnitPath) {
+		backup := discordUnitPath + legacyDisabledSuffix
+		if pathExists(backup) {
+			return errors.New("a legacy Discord unit backup already exists")
+		}
+		if err := os.Rename(discordUnitPath, backup); err != nil {
+			return err
+		}
+		service.unitMoved = true
+	}
+	if err := atomicWriteBytes(discordUnitPath, []byte(systemdUnits()[discordUnitPath]), 0644); err != nil {
+		return err
+	}
+	service.unitWritten = true
+	return runFixedCommand(ctx, systemctl, []string{"daemon-reload"})
+}
+
+func (service *legacyDiscordService) restore(ctx context.Context, systemctl string) {
+	if !service.stopped {
+		return
+	}
+	unit := filepath.Base(discordUnitPath)
+	if service.unitMoved {
+		_ = os.Rename(discordUnitPath+legacyDisabledSuffix, discordUnitPath)
+	}
+	if service.unitWritten || service.unitMoved {
+		_ = runFixedCommand(ctx, systemctl, []string{"daemon-reload"})
+	}
+	if service.wasEnabled {
+		_ = runFixedCommand(ctx, systemctl, []string{"enable", unit})
+	}
+	if service.wasActive {
+		_ = runFixedCommand(ctx, systemctl, []string{"start", unit})
+	}
 }

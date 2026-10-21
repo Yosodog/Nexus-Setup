@@ -162,3 +162,8 @@ file and remove the one you do not need before retrying.
 If assessment fails or the installation is modified or unknown, stop and
 inspect that deployment before changing it. `install_nexus.sh` is retired;
 use the guided command instead.
+
+Assessment reads each checkout with Git as the checkout's owner, such as
+`www-data` or a deploy user, so the checkout's own Git config never runs as
+root. The checkout directory and its `.git` directory must have the same
+owner, and that owner needs a local account.

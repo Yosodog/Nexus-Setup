@@ -215,6 +215,9 @@ func atomicSwitchRelease(paths Paths, component Component, release string) error
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("release directory is unavailable")
 	}
+	if err := recordActiveRelease(paths, component, release); err != nil {
+		return err
+	}
 	link, err := currentLink(paths, component)
 	if err != nil {
 		return err
@@ -237,4 +240,27 @@ func atomicSwitchRelease(paths Paths, component Component, release string) error
 	}
 	defer directory.Close()
 	return directory.Sync()
+}
+
+// recordActiveRelease writes the release a Subs or Discord unit is about to
+// run into that component's environment. The process reports these values in
+// its health document, and the health check rejects any other release, so
+// every switch, including one back to an earlier release, must update them
+// before the unit restarts. A component that is not configured yet has no
+// environment to update.
+func recordActiveRelease(paths Paths, component Component, release string) error {
+	if component != ComponentSubs && component != ComponentDiscord {
+		return nil
+	}
+	if _, err := ParseVersion(release); err != nil {
+		return err
+	}
+	path := filepath.Join(paths.NexusConfigDir, string(component), "environment")
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err := updateEnvironmentFile(path, map[string]string{"NEXUS_RELEASE_ID": release, "BUILD_COMMIT": release}); err != nil {
+		return fmt.Errorf("record %s %s in its environment: %w", component, release, err)
+	}
+	return nil
 }

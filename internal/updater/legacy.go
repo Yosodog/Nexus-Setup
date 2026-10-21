@@ -14,11 +14,14 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const (
 	legacyCorePath = "/var/www/nexus"
 	legacySubsPath = "/var/nexus-subs"
+
+	legacyGitTimeout = 2 * time.Minute
 )
 
 var legacyPHPSocketPattern = regexp.MustCompile(`unix:/run/php/php[0-9]+\.[0-9]+-fpm\.sock`)
@@ -92,7 +95,10 @@ func inspectLegacyRepository(ctx context.Context, path, repository string) (bool
 		return false, "", fmt.Errorf("legacy path %s is not a recognized Git checkout", path)
 	}
 	origin, err := runGitOutput(ctx, path, "remote", "get-url", "origin")
-	if err != nil || !officialLegacyOrigin(origin, repository) {
+	if err != nil {
+		return false, "", fmt.Errorf("legacy path %s could not be read with Git as its owner: %w", path, err)
+	}
+	if !officialLegacyOrigin(origin, repository) {
 		return false, "", fmt.Errorf("legacy path %s does not use the official Yosodog/%s repository", path, repository)
 	}
 	status, err := runGitOutput(ctx, path, "status", "--porcelain=v1", "--untracked-files=all")
@@ -131,12 +137,25 @@ func runGitOutput(ctx context.Context, directory string, arguments ...string) (s
 	if directory != legacyCorePath && directory != legacySubsPath {
 		return "", errors.New("legacy repository path is not allowlisted")
 	}
-	commandArguments := append([]string{"-C", directory}, arguments...)
+	return runLegacyGit(ctx, directory, arguments...)
+}
+
+// runLegacyGit runs Git in a legacy checkout as the checkout's owner. It takes
+// no optional locks, so inspecting the checkout never rewrites its index, and
+// it disables fsmonitor so no monitor daemon is left running.
+func runLegacyGit(ctx context.Context, directory string, arguments ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, legacyGitTimeout)
+	defer cancel()
+	commandArguments := append([]string{"--no-optional-locks", "-c", "core.fsmonitor=false", "-C", directory}, arguments...)
 	if err := validateFixedCommand("/usr/bin/git", commandArguments); err != nil {
 		return "", err
 	}
 	command := exec.CommandContext(ctx, "/usr/bin/git", commandArguments...)
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
+	command.WaitDelay = 5 * time.Second
+	if err := prepareLegacyGitCommand(command, directory); err != nil {
+		return "", err
+	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return "", err

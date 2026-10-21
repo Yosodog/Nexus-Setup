@@ -21,8 +21,9 @@ UUID, inspect it with `sudo nexus operation show <uuid>`.
 - **Download or package error:** check outbound DNS and HTTPS access to GitHub
   Releases and the package repositories. Bootstrap downloads the latest
   published binary; it does not build a local checkout.
-- **No release found for the stable channel:** before the first stable
-  release, only beta releases exist. Rerun bootstrap with `--channel beta`.
+- **No release found:** bootstrap could not read the release list from
+  GitHub. Check access to `github.com` and `api.github.com` and retry. To
+  install a specific release, pass `-s -- --version vX.Y.Z` after `sudo bash`.
 - **Checksum mismatch:** the download was corrupted or altered. Retry; if it
   keeps failing, do not install that binary and report it.
 - **`nexus` cannot connect to the updater socket:** check
@@ -111,8 +112,7 @@ sudo journalctl -u "nexus-updater-worker@UUID.service" -n 100 --no-pager
 
 `sudo nexus install` can adopt a recognized standard legacy deployment. It
 shows each detected component and its release and preserves the old checkout.
-Each checkout must be on a published release tag of its own repository; Core
-and Subs no longer need to be on the same tag.
+Each checkout must be on a published release tag of its own repository.
 If assessment fails or the installation is modified or unknown, stop and
 inspect that deployment before changing it. `install_nexus.sh` is retired;
 use the guided command instead.

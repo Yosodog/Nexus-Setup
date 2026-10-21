@@ -15,9 +15,15 @@ Each repository is versioned and released on its own:
 | `Nexus-AMS-Discord` | `nexus-discord.tar.gz`, `nexus-release.json` |
 
 Tags are `vMAJOR.MINOR.PATCH`, optionally with a prerelease suffix such as
-`v1.4.0-beta.1`. Pushing a tag runs the repository's release workflow, which
-tests, builds, and publishes the release. A failed test suite blocks
-publication. Tags with a suffix are published as GitHub prereleases and are
+`v1.4.0-beta.1`. Each repository has a one-click **Release** workflow (Actions →
+Release → Run workflow). It works out the next tag from a patch, minor or major
+bump (or an explicit version), checks that every `requires` minimum is a
+published release, pushes the tag, and runs the repository's release workflow,
+which tests, builds, and publishes the release. It does not wait for CI on the
+commit; a failed test suite in the release workflow still blocks publication.
+`dry_run` is on by default, so turn it off to actually release. Pushing a tag by
+hand runs the same release workflow. Never create the GitHub release yourself:
+the workflow creates it and fails if it already exists. Tags with a suffix are published as GitHub prereleases and are
 installed only by hosts on the beta channel. A hotfix is a tag in the one
 repository that needs it.
 

@@ -9,6 +9,7 @@
   config flag so `main` can be released at any time.
 - Commit as the repository's configured git identity (Yosodog). Do not change `user.name` or
   `user.email`, and do not add `Co-Authored-By` or other attribution trailers.
-- Releases are cut from `main` by the maintainer: `vX.Y.Z` for stable and `vX.Y.Z-beta.N` for
-  prereleases (patch for fixes, minor for features, major for changes that break another Nexus
-  component). Do not create tags or GitHub releases.
+- Releases are cut from `main` by the maintainer with the Release workflow
+  (`.github/workflows/cut-release.yml`): `vX.Y.Z` for stable and `vX.Y.Z-beta.N` for prereleases
+  (patch for fixes, minor for features, major for changes that break another Nexus component). Do
+  not create tags or GitHub releases, and do not run that workflow.

@@ -77,6 +77,9 @@ func run(arguments []string) error {
 	if len(arguments) == 1 && arguments[0] == "channel" {
 		return printChannel(client, jsonOutput)
 	}
+	if len(arguments) == 1 && arguments[0] == "core-workers" {
+		return printCoreWorkers(client, jsonOutput)
+	}
 	request, err := commandRequest(arguments)
 	if err != nil {
 		return err
@@ -97,6 +100,9 @@ func run(arguments []string) error {
 		}
 		if request.Operation == updater.OperationSetChannel && request.Channel == updater.ChannelBeta {
 			fmt.Println("The beta channel installs prereleases. They get less testing than stable releases.")
+		}
+		if request.Operation == updater.OperationSetCoreWorkers {
+			fmt.Printf("Core default-queue workers: %d. Each can use up to 512 MB of memory.\n", request.CoreWorkers)
 		}
 		if request.Operation == updater.OperationCleanup {
 			status, statusErr := call(client, updater.OperationGetStatus, "", nil)
@@ -147,6 +153,7 @@ Commands:
   component disable <name>        Disable Subs or Discord
   component restart <name>        Restart Core, Subs, or Discord
   channel [stable|beta]           Show or change the release channel
+  core-workers [1-8]              Show or change Core's default-queue workers
   operation show <uuid> [--json]  Show durable operation progress
   version [--json]                Print the nexus CLI version
   help [command]                  Show help
@@ -177,6 +184,8 @@ Mutation commands accept --yes for intentional non-interactive use.
 		return "Usage: nexus operation show <operation-id> [--json]\n", nil
 	case "channel":
 		return "Usage: nexus channel [stable|beta]\n\nWithout an argument, prints the release channel. stable follows only stable\nreleases; beta also follows prereleases such as v1.2.0-beta.1. Switching back\nto stable never downgrades: installed prereleases stay until stable releases\novertake them. The change applies to the next nexus update.\n", nil
+	case "core-workers":
+		return fmt.Sprintf("Usage: nexus core-workers [1-%d] [--yes]\n\nWithout an argument, prints how many processes work Core's default queue. With\na number, starts or stops workers to match; the others keep running. Each\nworker can use up to 512 MB of memory. Hosts run one worker by default.\n", updater.MaxCoreWorkers), nil
 	case "version":
 		return "Usage: nexus version [--json]\n", nil
 	default:
@@ -290,6 +299,17 @@ func commandRequest(arguments []string) (updater.Request, error) {
 		request, err := requestFor(updater.OperationSetChannel)
 		request.Channel = channel
 		return request, err
+	case "core-workers":
+		if len(arguments) != 2 {
+			return updater.Request{}, fmt.Errorf("usage: nexus core-workers [1-%d]", updater.MaxCoreWorkers)
+		}
+		count, err := strconv.Atoi(arguments[1])
+		if err != nil || count < 1 || count > updater.MaxCoreWorkers {
+			return updater.Request{}, fmt.Errorf("the Core worker count must be a number from 1 to %d", updater.MaxCoreWorkers)
+		}
+		request, err := requestFor(updater.OperationSetCoreWorkers)
+		request.CoreWorkers = count
+		return request, err
 	default:
 		return updater.Request{}, fmt.Errorf("unknown command %q", arguments[0])
 	}
@@ -366,7 +386,7 @@ func updaterOperationMutates(operation updater.Operation) bool {
 	case updater.OperationUpdate, updater.OperationRollback, updater.OperationCleanup,
 		updater.OperationInstallComponent, updater.OperationEnableComponent,
 		updater.OperationDisableComponent, updater.OperationRestartComponent,
-		updater.OperationSetChannel:
+		updater.OperationSetChannel, updater.OperationSetCoreWorkers:
 		return true
 	default:
 		return false
@@ -456,6 +476,27 @@ func printChannel(client updater.Client, jsonOutput bool) error {
 		return nil
 	}
 	fmt.Println(data.Channel)
+	return nil
+}
+
+func printCoreWorkers(client updater.Client, jsonOutput bool) error {
+	response, err := call(client, updater.OperationGetStatus, "", nil)
+	if err != nil {
+		return err
+	}
+	var data updater.StatusData
+	if err := updater.DecodeResponseData(response, &data); err != nil {
+		return err
+	}
+	if data.CoreWorkers == 0 {
+		return errors.New("Core is not installed on this host")
+	}
+	if jsonOutput {
+		encoded, _ := json.Marshal(map[string]int{"core_workers": data.CoreWorkers})
+		fmt.Println(string(encoded))
+		return nil
+	}
+	fmt.Println(data.CoreWorkers)
 	return nil
 }
 

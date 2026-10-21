@@ -89,6 +89,7 @@ unhealthy if any of them is down:
 | Unit | Runs |
 |---|---|
 | `nexus-core.service` | the `default` queue |
+| `nexus-core-worker@N.service` | extra `default` queue workers, only when `nexus core-workers` is above 1 |
 | `nexus-core-sync.service` | the `sync` queue (nation, Discord role, and beige-alert syncs) |
 | `nexus-core-pulse-check.service` | `pulse:check` |
 | `nexus-core-pulse-work.service` | `pulse:work`, only when Core's `.env` sets `PULSE_INGEST_DRIVER=redis` |

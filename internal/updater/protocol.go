@@ -29,6 +29,7 @@ type Request struct {
 	OperationID   string            `json:"-"`
 	Source        string            `json:"-"`
 	Channel       Channel           `json:"-"`
+	CoreWorkers   int               `json:"-"`
 	Configuration map[string]string `json:"-"`
 }
 
@@ -60,6 +61,7 @@ type requestPayload struct {
 	OperationID   string            `json:"operation_id,omitempty"`
 	Source        string            `json:"source,omitempty"`
 	Channel       Channel           `json:"channel,omitempty"`
+	CoreWorkers   int               `json:"core_workers,omitempty"`
 	Configuration map[string]string `json:"configuration,omitempty"`
 }
 
@@ -69,6 +71,7 @@ func (request Request) MarshalJSON() ([]byte, error) {
 		OperationID:   request.OperationID,
 		Source:        request.Source,
 		Channel:       request.Channel,
+		CoreWorkers:   request.CoreWorkers,
 		Configuration: request.Configuration,
 	}
 	payloadBytes, err := json.Marshal(payload)
@@ -113,6 +116,7 @@ func (request *Request) UnmarshalJSON(data []byte) error {
 	request.OperationID = payload.OperationID
 	request.Source = payload.Source
 	request.Channel = payload.Channel
+	request.CoreWorkers = payload.CoreWorkers
 	request.Configuration = payload.Configuration
 	return nil
 }
@@ -210,6 +214,12 @@ func (r Request) Validate() error {
 	if r.Operation != OperationSetChannel && r.Channel != "" {
 		return errors.New("channel is accepted only when setting the release channel")
 	}
+	if r.Operation == OperationSetCoreWorkers && !validCoreWorkers(r.CoreWorkers) {
+		return fmt.Errorf("core_workers must be from 1 to %d", MaxCoreWorkers)
+	}
+	if r.Operation != OperationSetCoreWorkers && r.CoreWorkers != 0 {
+		return errors.New("core_workers is accepted only when setting the Core worker count")
+	}
 	if err := validateComponentConfiguration(r.Operation, r.Component, r.Configuration); err != nil {
 		return err
 	}
@@ -243,6 +253,7 @@ func (r Request) Fingerprint() string {
 		OperationID         string
 		Source              string
 		Channel             Channel
+		CoreWorkers         int
 		ConfigurationDigest string
 	}{
 		Operation:           r.Operation,
@@ -250,6 +261,7 @@ func (r Request) Fingerprint() string {
 		OperationID:         r.OperationID,
 		Source:              r.Source,
 		Channel:             r.Channel,
+		CoreWorkers:         r.CoreWorkers,
 		ConfigurationDigest: configurationDigest(r.Configuration),
 	})
 	digest := sha256.Sum256(b)

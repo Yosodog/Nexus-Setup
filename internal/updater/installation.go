@@ -46,12 +46,14 @@ type InstalledComponent struct {
 // its own release history; LastChanged lists the components the most recent
 // update or rollback switched, which is what a plain rollback reverses.
 // SubsDelivery records how Subs reaches Core so updates keep the adopted mode;
-// an empty value means HTTP.
+// an empty value means HTTP. CoreWorkers is how many default-queue workers
+// Core runs; zero means one.
 type InstallationState struct {
 	Version      int                              `json:"version"`
 	Profile      Profile                          `json:"profile"`
 	Channel      Channel                          `json:"channel"`
 	SubsDelivery SubsDelivery                     `json:"subs_delivery,omitempty"`
+	CoreWorkers  int                              `json:"core_workers,omitempty"`
 	Components   map[Component]InstalledComponent `json:"components"`
 	LastChanged  []Component                      `json:"last_changed,omitempty"`
 	UpdatedAt    time.Time                        `json:"updated_at"`
@@ -120,6 +122,9 @@ func validateInstallation(state InstallationState) error {
 	}
 	if state.SubsDelivery == SubsDeliveryRedisStream && !subs.Installed {
 		return errors.New("Redis Stream delivery requires Subs")
+	}
+	if state.CoreWorkers != 0 && !validCoreWorkers(state.CoreWorkers) {
+		return errors.New("installation Core worker count is invalid")
 	}
 	switch state.Profile {
 	case ProfileFull, ProfileAppWebSubsRemoteDB:

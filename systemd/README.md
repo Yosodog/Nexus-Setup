@@ -13,8 +13,10 @@ embedded templates for review and packaging tests.
 
 Other component, queue-worker, and scheduler units are embedded in the binary;
 their active installation is under `/etc/systemd/system/`. Core's units are
-`nexus-core.service` (`default` queue), `nexus-core-sync.service` (`sync`
-queue), `nexus-core-pulse-check.service`, `nexus-core-pulse-work.service`
+`nexus-core.service` (`default` queue), the `nexus-core-worker@.service`
+template for extra `default` queue workers (`PartOf=nexus-core.service`),
+`nexus-core-sync.service` (`sync` queue), `nexus-core-pulse-check.service`,
+`nexus-core-pulse-work.service`
 (Redis Pulse ingest only), `nexus-core-subs-stream.service` (Subs Redis Stream
 delivery only), and `nexus-scheduler.service` with its timer.
 

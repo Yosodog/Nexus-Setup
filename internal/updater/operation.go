@@ -59,6 +59,7 @@ type OperationState struct {
 	Component        Component          `json:"component,omitempty"`
 	Source           string             `json:"source,omitempty"`
 	Channel          Channel            `json:"channel,omitempty"`
+	CoreWorkers      int                `json:"core_workers,omitempty"`
 	Fingerprint      string             `json:"fingerprint"`
 	HasConfiguration bool               `json:"has_configuration,omitempty"`
 	Releases         []ComponentRelease `json:"releases,omitempty"`
@@ -172,6 +173,7 @@ func (store *OperationStore) CreateOrGet(ctx context.Context, request Request) (
 		Component:        request.Component,
 		Source:           request.Source,
 		Channel:          request.Channel,
+		CoreWorkers:      request.CoreWorkers,
 		Fingerprint:      request.Fingerprint(),
 		HasConfiguration: len(request.Configuration) > 0,
 		Status:           OperationQueued,
@@ -324,6 +326,9 @@ func validateOperationState(state OperationState) error {
 	}
 	if state.Channel != "" && !validChannel(state.Channel) {
 		return errors.New("invalid operation state channel")
+	}
+	if state.CoreWorkers != 0 && !validCoreWorkers(state.CoreWorkers) {
+		return errors.New("invalid operation state Core worker count")
 	}
 	if state.Status != OperationQueued && state.Status != OperationRunning && state.Status != OperationCompleted && state.Status != OperationFailed && state.Status != OperationRolledBack && state.Status != OperationRecovery {
 		return errors.New("invalid operation state status")

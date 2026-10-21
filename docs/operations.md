@@ -76,6 +76,27 @@ A channel change applies to the next `nexus update`. Switching back to stable
 never downgrades anything: components stay on their prereleases until a stable
 release is newer.
 
+## Scale Core's queue workers
+
+```bash
+sudo nexus core-workers
+sudo nexus core-workers 2
+```
+
+Core works its `default` queue with one process unless you ask for more. If the
+backlog keeps growing, run from 1 to 8 workers. Each worker is capped at
+`MemoryMax=512M`, so budget 512 MB of memory per worker. The change starts or
+stops workers to match and leaves the running ones alone. The installation
+state keeps the count, so updates, rollbacks, restarts, and bootstrap keep it.
+
+Worker 1 is `nexus-core.service`; workers 2 and up run as
+`nexus-core-worker@2.service`, `nexus-core-worker@3.service`, and so on. They
+are part of `nexus-core.service`: `systemctl restart nexus-core.service` or
+`systemctl stop nexus-core.service` also restarts or stops them. If the command
+says `nexus-core-worker@2.service` is not installed, the updater is newer than
+the host's units; rerun the bootstrap command from the
+[installation guide](getting-started.md) and try again.
+
 ## Install and control components
 
 ```bash
@@ -104,7 +125,8 @@ restarted, but it cannot be installed, enabled, or disabled as an optional
 component. Use `nexus component list` to see the actions available locally.
 
 `component restart core` restarts every Core unit: the `default` queue
-worker (`nexus-core.service`), the `sync` queue worker
+workers (`nexus-core.service` and any extra `nexus-core-worker@N.service`
+workers), the `sync` queue worker
 (`nexus-core-sync.service`), Pulse's server checks
 (`nexus-core-pulse-check.service`), and PHP-FPM. When Core's `.env` sets
 `PULSE_INGEST_DRIVER=redis`, `nexus-core-pulse-work.service` also runs; when

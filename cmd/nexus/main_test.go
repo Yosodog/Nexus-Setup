@@ -14,7 +14,7 @@ func TestCommandHelpListsPublicCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, command := range []string{"install", "update", "status", "doctor", "rollback", "cleanup", "component", "channel", "operation", "version"} {
+	for _, command := range []string{"install", "update", "status", "doctor", "rollback", "cleanup", "component", "channel", "core-workers", "operation", "version"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("expected help to list %q", command)
 		}
@@ -66,6 +66,27 @@ func TestChannelCommandBuildsSetChannelRequest(t *testing.T) {
 	}
 	if _, err := commandRequest([]string{"channel", "nightly"}); err == nil {
 		t.Fatal("unknown channel was accepted")
+	}
+}
+
+func TestCoreWorkersCommandBuildsSetCoreWorkersRequest(t *testing.T) {
+	request, err := commandRequest([]string{"core-workers", "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Operation != updater.OperationSetCoreWorkers || request.CoreWorkers != 2 || request.OperationID == "" {
+		t.Fatalf("unexpected Core workers request: %+v", request)
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("Core workers request is invalid: %v", err)
+	}
+	for _, invalid := range [][]string{{"core-workers", "0"}, {"core-workers", "9"}, {"core-workers", "two"}, {"core-workers", "2", "3"}} {
+		if _, err := commandRequest(invalid); err == nil {
+			t.Fatalf("%v was accepted", invalid)
+		}
+	}
+	if _, err := commandHelp("core-workers"); err != nil {
+		t.Fatal(err)
 	}
 }
 

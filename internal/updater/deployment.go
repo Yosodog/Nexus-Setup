@@ -1072,6 +1072,9 @@ func (engine DeploymentEngine) writeCredential(component Component, name, value 
 	if err := os.MkdirAll(directory, 0750); err != nil {
 		return "", err
 	}
+	if err := chownPathToGroup(directory, string(component), 0750); err != nil {
+		return "", err
+	}
 	path := filepath.Join(directory, name)
 	if err := atomicWriteBytes(path, []byte(value+"\n"), 0640); err != nil {
 		return "", err

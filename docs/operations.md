@@ -45,7 +45,13 @@ new code, and checks the changed components. A release that needs a newer
 version of another component is held back until that version is available;
 `update --check` shows the reason. If health checks fail after activation, the
 changed components switch back to their previous releases. Database migrations
-are **not** reversed. If the update finishes unsuccessfully, inspect the
+are **not** reversed. Whenever Subs or Discord switches release, including
+during a rollback, the updater writes that release into `NEXUS_RELEASE_ID` and
+`BUILD_COMMIT` in `/etc/nexus/<component>/environment` before restarting it,
+because the health check expects the running process to report it. Releases
+are installed owned by root with directories and executables at `0755` and
+other files at `0644`, so the service accounts can read them but not change
+them. If the update finishes unsuccessfully, inspect the
 operation before retrying. When a held-back release needs a newer updater, run
 `sudo nexus update` again after the updater has updated itself.
 

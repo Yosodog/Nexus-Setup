@@ -259,8 +259,15 @@ func installCurrentBinary(paths Paths) error {
 		release = "bootstrap"
 	}
 	directory := filepath.Join(paths.UpdaterDir, "releases", release)
-	if err := os.MkdirAll(directory, 0755); err != nil {
+	if err := os.MkdirAll(directory, releaseDirectoryMode); err != nil {
 		return err
+	}
+	// Bootstrap may be repairing a release an earlier updater installed under
+	// its 0077 umask, so the modes are set rather than inherited.
+	for _, path := range []string{filepath.Dir(directory), directory} {
+		if err := os.Chmod(path, releaseDirectoryMode); err != nil {
+			return err
+		}
 	}
 	target := filepath.Join(directory, "nexus")
 	if err := copyExecutable(executable, target); err != nil {
@@ -283,6 +290,11 @@ func copyExecutable(source, target string) error {
 	_ = os.Remove(temporary)
 	output, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0755)
 	if err != nil {
+		return err
+	}
+	if err := output.Chmod(0755); err != nil {
+		_ = output.Close()
+		_ = os.Remove(temporary)
 		return err
 	}
 	if _, err := io.Copy(output, input); err != nil {

@@ -306,6 +306,9 @@ func (engine DeploymentEngine) stageComponent(ctx context.Context, operationID s
 		return err
 	}
 	if info, err := os.Lstat(target); err == nil && info.IsDir() {
+		if err := normalizeReleaseModes(target); err != nil {
+			return fmt.Errorf("repair %s %s file modes: %w", component, release, err)
+		}
 		return ValidateArtifactManifest(target, manifest)
 	}
 	repository, asset, err := componentReleaseAsset(component)
@@ -416,7 +419,11 @@ func installStagedTree(source, target string) error {
 		_ = os.RemoveAll(partial)
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(target), releaseDirectoryMode); err != nil {
+		_ = os.RemoveAll(partial)
+		return err
+	}
+	if err := os.Chmod(filepath.Dir(target), releaseDirectoryMode); err != nil {
 		_ = os.RemoveAll(partial)
 		return err
 	}
@@ -445,13 +452,13 @@ func copyRegularTree(source, destination string) error {
 			return errors.New("staged release contains a symlink")
 		}
 		if entry.IsDir() {
-			return os.MkdirAll(target, 0755)
+			if err := os.MkdirAll(target, releaseDirectoryMode); err != nil {
+				return err
+			}
+			return os.Chmod(target, releaseDirectoryMode)
 		}
 		if !entry.Type().IsRegular() {
 			return errors.New("staged release contains a special file")
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			return err
 		}
 		input, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
@@ -462,16 +469,16 @@ func copyRegularTree(source, destination string) error {
 			_ = input.Close()
 			return errors.New("staged source changed while it was being copied")
 		}
-		mode := os.FileMode(0644)
-		if info.Mode().Perm()&0111 != 0 {
-			mode = 0755
-		}
+		mode := releaseFileMode(info.Mode())
 		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
 		if err != nil {
 			_ = input.Close()
 			return err
 		}
-		_, copyErr := io.Copy(output, input)
+		copyErr := output.Chmod(mode)
+		if copyErr == nil {
+			_, copyErr = io.Copy(output, input)
+		}
 		if copyErr == nil {
 			copyErr = output.Sync()
 		}
@@ -619,8 +626,16 @@ func (engine DeploymentEngine) updateSelf(ctx context.Context, operationID, rele
 		return err
 	}
 	directory := filepath.Join(engine.Config.Paths.UpdaterDir, "releases", release)
-	if err := os.MkdirAll(directory, 0755); err != nil {
+	if err := os.MkdirAll(directory, releaseDirectoryMode); err != nil {
 		return err
+	}
+	// The worker's 0077 umask applies to directories it creates, and an
+	// earlier updater left its release directories root-only. The operator
+	// account runs nexus through them, so their modes are set explicitly.
+	for _, path := range []string{engine.Config.Paths.UpdaterDir, filepath.Dir(directory), directory} {
+		if err := os.Chmod(path, releaseDirectoryMode); err != nil {
+			return err
+		}
 	}
 	temporary := filepath.Join(directory, "nexus.partial")
 	_ = os.Remove(temporary)
@@ -1115,16 +1130,83 @@ func writeKeyValueFile(path string, values map[string]string, escapeDollar bool)
 	var builder strings.Builder
 	for _, key := range keys {
 		builder.WriteString(key)
-		builder.WriteString("=\"")
-		value := strings.ReplaceAll(values[key], `\`, `\\`)
-		value = strings.ReplaceAll(value, `"`, `\"`)
-		if escapeDollar {
-			value = strings.ReplaceAll(value, `$`, `\$`)
-		}
-		builder.WriteString(value)
-		builder.WriteString("\"\n")
+		builder.WriteString("=")
+		builder.WriteString(encodeKeyValue(values[key], escapeDollar))
+		builder.WriteString("\n")
 	}
 	return atomicWriteBytes(path, []byte(builder.String()), 0640)
+}
+
+// encodeKeyValue quotes a value the way writeKeyValueFile does. systemd
+// environment files leave $ alone, while dotenv files need it escaped.
+func encodeKeyValue(value string, escapeDollar bool) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	if escapeDollar {
+		value = strings.ReplaceAll(value, `$`, `\$`)
+	}
+	return `"` + value + `"`
+}
+
+// updateEnvironmentFile sets keys in a component's systemd environment file
+// and leaves its other lines, owner, and group alone. It does not rewrite a
+// file that already holds the values.
+func updateEnvironmentFile(path string, values map[string]string) error {
+	data, err := readBoundedRegularFile(path, 1024*1024)
+	if err != nil {
+		return err
+	}
+	updated, err := setKeyValueLines(data, values, false)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("environment file ownership is unavailable")
+	}
+	if bytes.Equal(updated, data) && info.Mode().Perm() == 0640 {
+		return nil
+	}
+	return atomicWriteOwnedBytes(path, updated, 0640, int(owner.Uid), int(owner.Gid))
+}
+
+// setKeyValueLines replaces every line that sets one of the keys in a
+// key=value file, appending keys it does not find, and keeps every other line
+// as it is.
+func setKeyValueLines(data []byte, values map[string]string, escapeDollar bool) ([]byte, error) {
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	remaining := make(map[string]string, len(values))
+	for key, value := range values {
+		if key == "" || strings.ContainsAny(key, "=\r\n\x00") || strings.ContainsAny(value, "\r\n\x00") {
+			return nil, errors.New("environment value is invalid")
+		}
+		remaining[key] = value
+	}
+	for index, line := range lines {
+		for key, value := range values {
+			if strings.HasPrefix(line, key+"=") {
+				lines[index] = key + "=" + encodeKeyValue(value, escapeDollar)
+				delete(remaining, key)
+				break
+			}
+		}
+	}
+	keys := make([]string, 0, len(remaining))
+	for key := range remaining {
+		keys = append(keys, key)
+	}
+	sortStrings(keys)
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for _, key := range keys {
+		lines = append(lines, key+"="+encodeKeyValue(remaining[key], escapeDollar))
+	}
+	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 
 func sortStrings(values []string) {
@@ -1257,42 +1339,11 @@ func updateCoreEnvironment(path string, values map[string]string) error {
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	remaining := make(map[string]string, len(values))
-	for key, value := range values {
-		if key == "" || strings.ContainsAny(key, "=\r\n\x00") || strings.ContainsAny(value, "\r\n\x00") {
-			return errors.New("Core environment value is invalid")
-		}
-		remaining[key] = value
+	updated, err := setKeyValueLines(data, values, true)
+	if err != nil {
+		return errors.New("Core environment value is invalid")
 	}
-	for index, line := range lines {
-		for key, value := range remaining {
-			if strings.HasPrefix(line, key+"=") {
-				lines[index] = key + "=" + encodeDotEnvValue(value)
-				delete(remaining, key)
-				break
-			}
-		}
-	}
-	keys := make([]string, 0, len(remaining))
-	for key := range remaining {
-		keys = append(keys, key)
-	}
-	sortStrings(keys)
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	for _, key := range keys {
-		lines = append(lines, key+"="+encodeDotEnvValue(remaining[key]))
-	}
-	return writeCoreEnvironmentBytes(path, []byte(strings.Join(lines, "\n")+"\n"))
-}
-
-func encodeDotEnvValue(value string) string {
-	value = strings.ReplaceAll(value, `\`, `\\`)
-	value = strings.ReplaceAll(value, `"`, `\"`)
-	value = strings.ReplaceAll(value, `$`, `\$`)
-	return `"` + value + `"`
+	return writeCoreEnvironmentBytes(path, updated)
 }
 
 func writeCoreEnvironmentBytes(path string, data []byte) error {
@@ -1311,6 +1362,13 @@ func randomSecret(bytesCount int) (string, error) {
 }
 
 func atomicWriteBytes(path string, data []byte, mode os.FileMode) error {
+	return atomicWriteOwnedBytes(path, data, mode, -1, -1)
+}
+
+// atomicWriteOwnedBytes replaces path with data, giving the new file its mode
+// and, unless they are -1, its owner and group before it takes the old file's
+// place.
+func atomicWriteOwnedBytes(path string, data []byte, mode os.FileMode, uid, gid int) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return err
 	}
@@ -1323,6 +1381,12 @@ func atomicWriteBytes(path string, data []byte, mode os.FileMode) error {
 	if err := temporary.Chmod(mode); err != nil {
 		_ = temporary.Close()
 		return err
+	}
+	if uid != -1 || gid != -1 {
+		if err := temporary.Chown(uid, gid); err != nil {
+			_ = temporary.Close()
+			return err
+		}
 	}
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
@@ -1357,6 +1421,11 @@ func (engine DeploymentEngine) setComponentEnabled(ctx context.Context, operatio
 	if enabled {
 		action = "enable"
 		arguments = []string{action, "--now", unit}
+	}
+	if enabled {
+		if err := recordActiveRelease(engine.Config.Paths, operation.Component, record.CurrentRelease); err != nil {
+			return err
+		}
 	}
 	if err := engine.Executor.Run(ctx, engine.Config.SystemctlBinary, arguments); err != nil {
 		return err
@@ -1414,6 +1483,9 @@ func (engine DeploymentEngine) restartComponent(ctx context.Context, component C
 	}
 	services := hostServicesFor(engine.Config.Paths, state)
 	if err := engine.requireServiceUnits(ctx, []Component{component}, services); err != nil {
+		return err
+	}
+	if err := recordActiveRelease(engine.Config.Paths, component, state.Components[component].CurrentRelease); err != nil {
 		return err
 	}
 	if err := engine.restartComponents(ctx, []Component{component}, services); err != nil {

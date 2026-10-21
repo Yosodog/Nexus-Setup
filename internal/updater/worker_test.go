@@ -48,10 +48,13 @@ func TestWorkerUsesOnlyFixedServiceUnit(t *testing.T) {
 	if err := runWorker(context.Background(), config, store, locks, operation.ID, executor, emptyReleaseProvider{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.calls) != 2 {
-		t.Fatalf("expected restart and a successful health check, got %#v", executor.calls)
+	if len(executor.calls) != 3 {
+		t.Fatalf("expected a unit check, restart, and a successful health check, got %#v", executor.calls)
 	}
-	if executor.calls[0][1] != "restart" || executor.calls[0][2] != "nexus-subs.service" {
-		t.Fatalf("unexpected service command: %#v", executor.calls[0])
+	if executor.calls[0][1] != "cat" || executor.calls[0][2] != "nexus-subs.service" {
+		t.Fatalf("unexpected unit check: %#v", executor.calls[0])
+	}
+	if executor.calls[1][1] != "restart" || executor.calls[1][2] != "nexus-subs.service" {
+		t.Fatalf("unexpected service command: %#v", executor.calls[1])
 	}
 }

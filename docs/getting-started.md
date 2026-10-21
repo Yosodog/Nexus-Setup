@@ -40,9 +40,10 @@ checksum, installs `/usr/local/bin/nexus`, and configures the protected updater
 socket and service accounts. It does **not** install Nexus Core yet. You can
 check the command with `nexus version`.
 
-To run prereleases, add `-s -- --channel beta` after `sudo bash` here and use
-`sudo nexus install --channel beta` in the next step. You can also download
-`bootstrap.sh`, read it, and run `sudo bash bootstrap.sh`.
+If you prefer to read the script first, download `bootstrap.sh`, review it,
+and run `sudo bash bootstrap.sh`. Bootstrap and the installer use the stable
+release channel by default; see [release channels](operations.md#choose-a-release-channel)
+if you want to test prereleases.
 
 ## 3. Run the guided installer
 
@@ -60,9 +61,9 @@ and asks again.
 
 Before it changes anything, the installer checks that the domain resolves to
 this server, that Politics & War accepts the API key, and that the key's nation
-is in the alliance and matches the administrator nation ID. An error stops the installation with
-nothing changed; a warning, such as a domain that points somewhere this server
-cannot reach, asks whether to continue. `--yes` skips only the warning and
+is in the alliance and matches the administrator nation ID. An error stops the
+installation with nothing changed. A warning, such as a key from a different
+nation or a domain this server cannot reach, asks whether to continue. `--yes` skips only the warning and
 final confirmations; it does not skip the required questions.
 
 The installer creates the local `nexus` database and credentials, installs
@@ -80,8 +81,9 @@ sudo nexus component list
 ```
 
 `status` shows each component's release, the channel, and the profile.
-`doctor` checks installation state, disk space, and managed directories. `component list` shows Core and
-Subs installed and enabled; Discord is optional. Open `https://` followed by
+`doctor` checks installation state, disk space, and managed directories.
+`component list` shows Core and Subs installed and enabled; Discord is
+optional and can be [added later](operations.md#install-and-control-components). Open `https://` followed by
 your domain and sign in with the administrator account you entered.
 
 Use `sudo nexus ...` immediately after bootstrap. If bootstrap was run from a
@@ -89,5 +91,12 @@ normal account with `sudo`, sign out and back in to pick up its updater group
 membership; that account can then run the operating commands without `sudo`.
 `nexus install` always requires `sudo`.
 
-Continue with [operating Nexus](operations.md). If a step fails, use
-[troubleshooting](troubleshooting.md) before retrying the installation.
+Next steps:
+
+- Set up a database backup routine. Nexus Setup never backs up the database.
+- Add the Discord bot if your alliance uses it; see
+  [install and control components](operations.md#install-and-control-components).
+- Read [operating Nexus](operations.md) before your first update.
+
+If a step fails, use [troubleshooting](troubleshooting.md) before retrying the
+installation.

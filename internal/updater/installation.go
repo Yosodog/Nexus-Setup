@@ -45,13 +45,16 @@ type InstalledComponent struct {
 // InstallationState records what is installed on this host. Each component has
 // its own release history; LastChanged lists the components the most recent
 // update or rollback switched, which is what a plain rollback reverses.
+// SubsDelivery records how Subs reaches Core so updates keep the adopted mode;
+// an empty value means HTTP.
 type InstallationState struct {
-	Version     int                              `json:"version"`
-	Profile     Profile                          `json:"profile"`
-	Channel     Channel                          `json:"channel"`
-	Components  map[Component]InstalledComponent `json:"components"`
-	LastChanged []Component                      `json:"last_changed,omitempty"`
-	UpdatedAt   time.Time                        `json:"updated_at"`
+	Version      int                              `json:"version"`
+	Profile      Profile                          `json:"profile"`
+	Channel      Channel                          `json:"channel"`
+	SubsDelivery SubsDelivery                     `json:"subs_delivery,omitempty"`
+	Components   map[Component]InstalledComponent `json:"components"`
+	LastChanged  []Component                      `json:"last_changed,omitempty"`
+	UpdatedAt    time.Time                        `json:"updated_at"`
 }
 
 const installationStateVersion = 2
@@ -112,6 +115,12 @@ func validateInstallation(state InstallationState) error {
 	}
 	core := state.Components[ComponentCore]
 	subs := state.Components[ComponentSubs]
+	if !validSubsDelivery(state.SubsDelivery) {
+		return errors.New("installation Subs delivery mode is invalid")
+	}
+	if state.SubsDelivery == SubsDeliveryRedisStream && !subs.Installed {
+		return errors.New("Redis Stream delivery requires Subs")
+	}
 	switch state.Profile {
 	case ProfileFull, ProfileAppWebSubsRemoteDB:
 		if !core.Installed || !core.Enabled || !subs.Installed {

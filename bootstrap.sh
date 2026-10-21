@@ -44,9 +44,7 @@ resolve_tag() {
   fi
   if [[ ! ${tag} =~ ${tag_pattern} ]]; then
     echo "No published Nexus CLI release was found for the ${channel} channel." >&2
-    if [[ ${channel} == stable ]]; then
-      echo 'If only beta releases exist yet, rerun with --channel beta.' >&2
-    fi
+    echo 'Check access to github.com and api.github.com, then retry.' >&2
     return 1
   fi
   printf '%s\n' "${tag}"

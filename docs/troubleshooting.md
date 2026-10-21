@@ -24,6 +24,9 @@ UUID, inspect it with `sudo nexus operation show <uuid>`.
 - **No release found:** bootstrap could not read the release list from
   GitHub. Check access to `github.com` and `api.github.com` and retry. To
   install a specific release, pass `-s -- --version vX.Y.Z` after `sudo bash`.
+- **`temporary_directory: unbound variable` at exit:** bootstrap releases
+  before this fix failed to remove their download folder. The install itself
+  succeeded; delete the leftover `/var/tmp/nexus-bootstrap.*` folder.
 - **Checksum mismatch:** the download was corrupted or altered. Retry; if it
   keeps failing, do not install that binary and report it.
 - **`nexus` cannot connect to the updater socket:** check
@@ -138,8 +141,9 @@ also need a `.env`. A Discord bot can only be adopted together with Core.
 Adoption takes over everything the old deployment ran:
 
 - **Supervisor:** every program in `/etc/supervisor/conf.d/*.conf` whose
-  `directory=` is one of the checkouts, or whose `command=` runs a file inside
-  one, is stopped. Its configuration file is renamed with a `.nexus-disabled`
+  `directory=` is one of the checkouts or a folder inside one (such as
+  `/var/nexus-subs/src`), or whose `command=` runs a file inside one, is
+  stopped. A relative path in `command=` is read relative to `directory=`. Its configuration file is renamed with a `.nexus-disabled`
   suffix once the managed services are healthy, which also disables any other
   program in the same file.
 - **Discord:** the legacy `nexus-discord.service` is stopped and disabled, and
@@ -153,10 +157,26 @@ Adoption takes over everything the old deployment ran:
   must have the same `SUBS_REDIS_HMAC_SECRET` and `SUBS_REDIS_STREAM` as Subs.
 - **Cron:** the `schedule:run` line for the legacy checkout is removed from
   `/etc/crontab`.
+- **PHP:** packages are installed for the PHP version `/usr/bin/php` already
+  runs (`php8.3-fpm`, `php8.3-cli`, and so on), so a PHP repository such as
+  `ppa:ondrej/php` cannot add a newer PHP and switch `/usr/bin/php` to it.
+  `phpX.Y-redis` is added when Core's `.env` uses Redis for its cache, queue,
+  sessions, or Pulse, sets `REDIS_CLIENT=phpredis`, or Subs delivers through a
+  Redis Stream. An apt pin that kept the distribution's PHP is no longer
+  needed.
 
-If any step fails, adoption stops the managed services and restores the
-Supervisor files, the legacy Discord unit, Nginx, and the crontab, then starts
-the legacy programs again. If it reports that a `.nexus-disabled` backup
+The legacy Core is put in maintenance mode while the managed Core migrates the
+database. The managed Core and Subs are started and checked first, then Nginx
+is switched to the managed Core, and only then is the managed Discord bot
+started, checked, and its commands registered. The bot calls Core through its
+public `NEXUS_API_URL`, so it is never checked against the legacy Core while
+that answers 503. The legacy Core leaves maintenance mode once adoption
+completes or is rolled back.
+
+If any step fails, including the Discord check after the Nginx switch,
+adoption stops the managed services and restores the Supervisor files, the
+legacy Discord unit, Nginx, and the crontab, then starts the legacy programs
+again and takes the legacy Core out of maintenance mode. If it reports that a `.nexus-disabled` backup
 already exists, an earlier attempt left it behind: compare it with the active
 file and remove the one you do not need before retrying.
 

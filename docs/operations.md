@@ -134,6 +134,16 @@ Subs delivers through a Redis Stream, `nexus-core-subs-stream.service` runs
 `subs:consume-stream`. The scheduler runs from `nexus-scheduler.timer`. Updates
 and rollbacks restart and health-check the same units.
 
+Core's services, Artisan commands, and PHP-FPM all use the PHP that
+`/usr/bin/php` runs. Installation and adoption install versioned packages for
+that PHP (`php8.3-fpm`, `php8.3-cli`, and so on) so a PHP repository such as
+`ppa:ondrej/php` never adds a newer PHP next to it. A host without PHP 8.3 or
+newer gets PHP 8.3, 8.4 on Debian 13, or the distribution default on Ubuntu
+26.04; Ubuntu 22.04 and Debian 12 get it from `ppa:ondrej/php` and
+`packages.sury.org`. If installation reports that
+`/usr/bin/php` runs a different PHP than it installed, select the installed one
+with `sudo update-alternatives --set php /usr/bin/phpX.Y` and retry.
+
 New installations deliver Subs events to Core over HTTP. A host adopted from a
 legacy deployment that used `DELIVERY_DRIVER=redis-stream` keeps it: the
 installation state records the mode, so updates never switch it back to HTTP.

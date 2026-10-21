@@ -350,7 +350,7 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := provisionPackages(ctx, platform, options.Profile); err != nil {
+	if err := provisionPackages(ctx, platform, options.Profile, false); err != nil {
 		return err
 	}
 	releases := NewGitHubReleaseClient()
@@ -575,7 +575,24 @@ func validateInstallOptions(options InstallOptions) error {
 	return nil
 }
 
-func provisionPackages(ctx context.Context, platform Platform, profile Profile) error {
+// defaultPHPVersions is the PHP Nexus installs on a host that has no PHP 8.3
+// or newer yet. Ubuntu 22.04 and Debian 12 get it from the PHP repository
+// added below; the others ship it.
+var defaultPHPVersions = map[string]string{
+	"ubuntu 22.04": "8.3",
+	"ubuntu 24.04": "8.3",
+	"debian 12":    "8.3",
+	"debian 13":    "8.4",
+}
+
+var phpVersionPattern = regexp.MustCompile(`^([0-9]+)\.([0-9]+)$`)
+
+// provisionPackages installs the host packages a profile needs. PHP packages
+// are versioned so a third-party PHP repository cannot install a newer PHP
+// next to the one the host already runs and move /usr/bin/php to it.
+func provisionPackages(ctx context.Context, platform Platform, profile Profile, coreUsesRedis bool) error {
+	installedPHP, _ := installedPHPVersion(ctx)
+	phpVersion := phpPackageVersion(platform, installedPHP)
 	if err := runFixedCommand(ctx, "/usr/bin/apt-get", []string{"update"}); err != nil {
 		return err
 	}
@@ -616,13 +633,84 @@ func provisionPackages(ctx context.Context, platform Platform, profile Profile) 
 		packages = append(packages, "nodejs")
 	}
 	if profile != ProfileDatabaseOnly && profile != ProfileSubsOnly {
-		packages = append(packages, "nginx", "certbot", "python3-certbot-nginx", "php-fpm", "php-cli", "php-mysql", "php-mbstring", "php-xml", "php-curl", "php-zip", "php-bcmath", "php-gd", "php-intl")
+		packages = append(packages, "nginx", "certbot", "python3-certbot-nginx")
+		packages = append(packages, phpPackages(phpVersion, coreUsesRedis)...)
 	}
 	arguments := append([]string{"install", "-y", "--no-install-recommends"}, packages...)
 	if err := runFixedCommand(ctx, "/usr/bin/apt-get", arguments); err != nil {
 		return err
 	}
-	return validateInstalledRuntimes(ctx, profile)
+	return validateInstalledRuntimes(ctx, profile, phpVersion)
+}
+
+// phpPackageVersion picks the PHP whose packages are installed: the one
+// /usr/bin/php already runs when it is new enough, otherwise the platform's
+// default. An empty result means the platform's unversioned packages.
+func phpPackageVersion(platform Platform, installed string) string {
+	if phpVersionSupported(installed) {
+		return installed
+	}
+	return defaultPHPVersions[platform.ID+" "+platform.Version]
+}
+
+func phpVersionSupported(version string) bool {
+	match := phpVersionPattern.FindStringSubmatch(version)
+	if match == nil {
+		return false
+	}
+	major, majorErr := strconv.Atoi(match[1])
+	minor, minorErr := strconv.Atoi(match[2])
+	return majorErr == nil && minorErr == nil && (major > 8 || (major == 8 && minor >= 3))
+}
+
+// phpPackages lists Core's PHP packages for a version, such as php8.3-fpm,
+// or the unversioned php-fpm when the version is empty.
+func phpPackages(version string, redis bool) []string {
+	extensions := []string{"fpm", "cli", "mysql", "mbstring", "xml", "curl", "zip", "bcmath", "gd", "intl"}
+	if redis {
+		extensions = append(extensions, "redis")
+	}
+	packages := make([]string, 0, len(extensions))
+	for _, extension := range extensions {
+		packages = append(packages, "php"+version+"-"+extension)
+	}
+	return packages
+}
+
+// coreEnvironmentUsesRedis reports whether a Core .env needs the phpredis
+// extension: a Laravel cache, queue, session, or Pulse ingest driver uses
+// Redis, or the Redis client is phpredis.
+func coreEnvironmentUsesRedis(path string) (bool, error) {
+	for _, key := range []string{"CACHE_STORE", "CACHE_DRIVER", "QUEUE_CONNECTION", "SESSION_DRIVER", "PULSE_INGEST_DRIVER"} {
+		value, err := readEnvValue(path, key)
+		if err != nil {
+			return false, err
+		}
+		if strings.EqualFold(strings.TrimSpace(value), "redis") {
+			return true, nil
+		}
+	}
+	client, err := readEnvValue(path, "REDIS_CLIENT")
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(strings.TrimSpace(client), "phpredis"), nil
+}
+
+// installedPHPVersion returns the major.minor version /usr/bin/php runs,
+// which is the PHP every Core service and Artisan command uses.
+func installedPHPVersion(ctx context.Context) (string, error) {
+	command := exec.CommandContext(ctx, "/usr/bin/php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;")
+	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
+	output, err := command.Output()
+	if err != nil {
+		return "", err
+	}
+	version := strings.TrimSpace(string(output))
+	if !phpVersionPattern.MatchString(version) {
+		return "", errors.New("PHP version could not be determined")
+	}
+	return version, nil
 }
 
 func installNodeSourceRepository(ctx context.Context) error {
@@ -648,7 +736,7 @@ func installNodeSourceRepository(ctx context.Context) error {
 	return atomicWriteBytes("/etc/apt/sources.list.d/nodesource.sources", []byte(source), 0644)
 }
 
-func validateInstalledRuntimes(ctx context.Context, profile Profile) error {
+func validateInstalledRuntimes(ctx context.Context, profile Profile, phpVersion string) error {
 	if profile != ProfileDatabaseOnly {
 		command := exec.CommandContext(ctx, "/usr/bin/node", "--version")
 		command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
@@ -658,11 +746,12 @@ func validateInstalledRuntimes(ctx context.Context, profile Profile) error {
 		}
 	}
 	if profile != ProfileDatabaseOnly && profile != ProfileSubsOnly {
-		command := exec.CommandContext(ctx, "/usr/bin/php", "-r", "echo PHP_VERSION;")
-		command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
-		output, err := command.Output()
-		if err != nil || !regexp.MustCompile(`^(8\.[3-9]|9\.)`).Match(bytes.TrimSpace(output)) {
+		version, err := installedPHPVersion(ctx)
+		if err != nil || !phpVersionSupported(version) {
 			return errors.New("PHP 8.3 or newer is required")
+		}
+		if phpVersion != "" && version != phpVersion {
+			return fmt.Errorf("PHP %s was installed but /usr/bin/php runs PHP %s; select it with: update-alternatives --set php /usr/bin/php%s", phpVersion, version, phpVersion)
 		}
 	}
 	return nil
@@ -931,16 +1020,12 @@ func provisionAdministrator(ctx context.Context, engine DeploymentEngine, releas
 	return command.Run()
 }
 
+// configurePHPFPM runs Core's pool on the PHP-FPM of the version /usr/bin/php
+// runs, which provisionPackages installed and checked.
 func configurePHPFPM(ctx context.Context, paths Paths) error {
-	command := exec.CommandContext(ctx, "/usr/bin/php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;")
-	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
-	output, err := command.Output()
+	version, err := installedPHPVersion(ctx)
 	if err != nil {
 		return err
-	}
-	version := strings.TrimSpace(string(output))
-	if !regexp.MustCompile(`^[0-9]+\.[0-9]+$`).MatchString(version) {
-		return errors.New("PHP version could not be determined")
 	}
 	pool := "[nexus-core]\nuser = nexus-core\ngroup = nexus-core\nlisten = /run/php/nexus-core.sock\nlisten.owner = www-data\nlisten.group = www-data\nlisten.mode = 0660\npm = dynamic\npm.max_children = 20\npm.start_servers = 2\npm.min_spare_servers = 2\npm.max_spare_servers = 6\nclear_env = yes\n"
 	path := filepath.Join("/etc/php", version, "fpm/pool.d/nexus-core.conf")

@@ -12,6 +12,16 @@ readonly releases_api='https://api.github.com/repos/Yosodog/Nexus-Setup/releases
 readonly asset='nexus-linux-amd64'
 readonly tag_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
 
+# The download directory is global so the EXIT trap can still see it after
+# main returns; a local would be out of scope by then.
+download_directory=''
+
+cleanup() {
+  if [[ -n ${download_directory} ]]; then
+    rm -rf -- "${download_directory}"
+  fi
+}
+
 usage() {
   echo 'usage: bootstrap.sh [--channel stable|beta] [--version vX.Y.Z]' >&2
 }
@@ -112,20 +122,20 @@ main() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl
   fi
 
-  local tag temporary_directory
+  local tag
   tag=$(resolve_tag "${channel}" "${version}")
-  temporary_directory=$(mktemp -d /var/tmp/nexus-bootstrap.XXXXXXXX)
-  trap 'rm -rf -- "${temporary_directory}"' EXIT
+  trap cleanup EXIT
+  download_directory=$(mktemp -d /var/tmp/nexus-bootstrap.XXXXXXXX)
 
   echo "Downloading the Nexus CLI ${tag}..."
-  fetch --output "${temporary_directory}/${asset}" "${repository_url}/releases/download/${tag}/${asset}"
-  fetch --output "${temporary_directory}/${asset}.sha256" "${repository_url}/releases/download/${tag}/${asset}.sha256"
-  if ! (cd "${temporary_directory}" && sha256sum --check --status --strict "${asset}.sha256"); then
+  fetch --output "${download_directory}/${asset}" "${repository_url}/releases/download/${tag}/${asset}"
+  fetch --output "${download_directory}/${asset}.sha256" "${repository_url}/releases/download/${tag}/${asset}.sha256"
+  if ! (cd "${download_directory}" && sha256sum --check --status --strict "${asset}.sha256"); then
     echo "The downloaded Nexus CLI does not match its published SHA-256 checksum." >&2
     return 1
   fi
 
-  install -o root -g root -m 0755 "${temporary_directory}/${asset}" /usr/local/bin/nexus
+  install -o root -g root -m 0755 "${download_directory}/${asset}" /usr/local/bin/nexus
   /usr/local/bin/nexus internal configure-host
 
   echo

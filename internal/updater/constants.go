@@ -22,6 +22,7 @@ const (
 	OperationDisableComponent Operation = "DisableComponent"
 	OperationRestartComponent Operation = "RestartComponent"
 	OperationSetChannel       Operation = "SetChannel"
+	OperationSetCoreWorkers   Operation = "SetCoreWorkers"
 )
 
 // Component is the closed set of first-party components. A caller cannot
@@ -61,7 +62,8 @@ func validOperation(operation Operation) bool {
 	case OperationGetStatus, OperationCheckUpdates, OperationDoctor,
 		OperationUpdate, OperationRollback, OperationCleanup, OperationGetOperation,
 		OperationListComponents, OperationInstallComponent, OperationEnableComponent,
-		OperationDisableComponent, OperationRestartComponent, OperationSetChannel:
+		OperationDisableComponent, OperationRestartComponent, OperationSetChannel,
+		OperationSetCoreWorkers:
 		return true
 	default:
 		return false
@@ -100,7 +102,7 @@ func mutatingOperation(operation Operation) bool {
 	switch operation {
 	case OperationUpdate, OperationRollback, OperationCleanup, OperationInstallComponent,
 		OperationEnableComponent, OperationDisableComponent, OperationRestartComponent,
-		OperationSetChannel:
+		OperationSetChannel, OperationSetCoreWorkers:
 		return true
 	default:
 		return false

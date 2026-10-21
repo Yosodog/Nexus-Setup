@@ -57,6 +57,8 @@ func (engine DeploymentEngine) Run(ctx context.Context, operation OperationState
 		return engine.restartComponent(ctx, operation.Component)
 	case OperationSetChannel:
 		return engine.setChannel(operation.Channel)
+	case OperationSetCoreWorkers:
+		return engine.setCoreWorkers(ctx, operation.CoreWorkers)
 	default:
 		return fmt.Errorf("unsupported worker operation %q", operation.Operation)
 	}
@@ -555,7 +557,7 @@ func (engine DeploymentEngine) restartComponents(ctx context.Context, components
 			return err
 		}
 		for _, unit := range units {
-			if err := engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"restart", unit}); err != nil {
+			if err := engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{restartAction(unit), unit}); err != nil {
 				return err
 			}
 		}

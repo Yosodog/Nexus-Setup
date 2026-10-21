@@ -11,7 +11,7 @@ the systemd services, and handles updates, rollback, and cleanup.
 - [Choose an installation profile](docs/installation-profiles.md) — one
   server, a remote database, or split database and Subs hosts.
 - [Operate Nexus](docs/operations.md) — updates, rollback, release channels,
-  optional components, and cleanup.
+  Core queue workers, optional components, and cleanup.
 - [Troubleshoot](docs/troubleshooting.md) — installation failures, service
   health, and interrupted operations.
 - [Release contract](docs/releasing.md) — for maintainers publishing Nexus
@@ -53,6 +53,7 @@ nexus update
 nexus rollback [core|subs|discord]
 nexus cleanup
 nexus channel [stable|beta]
+nexus core-workers [1-8]
 
 nexus component list
 nexus component install subs|discord
@@ -135,7 +136,9 @@ if adoption fails. See
 A Core host runs one systemd unit per long-running process:
 `nexus-core.service` (`default` queue), `nexus-core-sync.service` (`sync`
 queue), `nexus-core-pulse-check.service`, `nexus-core-php-fpm.service`, and
-`nexus-scheduler.timer`. `nexus-core-pulse-work.service` runs when Core's `.env`
+`nexus-scheduler.timer`. `sudo nexus core-workers N` adds `default` queue
+workers as `nexus-core-worker@2.service` through `@N.service`, up to 8 in all;
+each is capped at 512 MB of memory. `nexus-core-pulse-work.service` runs when Core's `.env`
 sets `PULSE_INGEST_DRIVER=redis`, and `nexus-core-subs-stream.service` runs when
 Subs delivers through a Redis Stream. Bootstrap installs the unit files;
 rerunning it on a managed host installs units added by a newer updater and

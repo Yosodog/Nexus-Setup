@@ -39,6 +39,7 @@ type StatusData struct {
 	ErrorCode      string            `json:"error_code,omitempty"`
 	UpdaterVersion string            `json:"updater_version"`
 	Channel        string            `json:"channel"`
+	CoreWorkers    int               `json:"core_workers,omitempty"`
 	Profile        Profile           `json:"profile,omitempty"`
 	Platform       string            `json:"platform,omitempty"`
 	Host           HostStatus        `json:"host"`
@@ -349,6 +350,9 @@ func (server *Server) statusData() StatusData {
 	if state, err := LoadInstallation(server.config.Paths); err == nil {
 		data.Installed = true
 		data.Channel = string(state.Channel)
+		if state.Components[ComponentCore].Installed {
+			data.CoreWorkers = coreWorkerCount(state)
+		}
 		data.Profile = state.Profile
 		data.Host.Profile = state.Profile
 		if state.Profile == ProfileDatabaseOnly {

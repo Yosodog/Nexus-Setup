@@ -150,7 +150,7 @@ func ConfigureHost(ctx context.Context) error {
 	}
 	allowedUIDs = uniqueUint32(allowedUIDs)
 	allowedGIDs = uniqueUint32(allowedGIDs)
-	for _, directory := range []string{paths.StateDir, paths.OperationsDir, paths.DownloadsDir, paths.StagingDir, paths.LocksDir, paths.SecretsDir, paths.ConfigDir, paths.CredentialDir} {
+	for _, directory := range []string{paths.StateDir, paths.OperationsDir, paths.DownloadsDir, paths.StagingDir, paths.LocksDir, paths.SecretsDir, paths.ConfigDir} {
 		if err := os.MkdirAll(directory, 0700); err != nil {
 			return err
 		}
@@ -168,6 +168,17 @@ func ConfigureHost(ctx context.Context) error {
 		if err := os.MkdirAll(directory, 0755); err != nil {
 			return err
 		}
+		if err := os.Chmod(directory, 0755); err != nil {
+			return err
+		}
+	}
+	// Service accounts open their own credential files by path, so the shared
+	// directory must be traversable without being listable.
+	if err := os.MkdirAll(paths.CredentialDir, 0711); err != nil {
+		return err
+	}
+	if err := os.Chmod(paths.CredentialDir, 0711); err != nil {
+		return err
 	}
 	for _, account := range []string{"nexus-core", "nexus-subs", "nexus-discord"} {
 		dataDirectory := filepath.Join(paths.DataDir, account)

@@ -21,10 +21,10 @@ previous release, component state, and recent operations.
 release that is held back and why, and any newer `nexus` updater. Database-only
 hosts have no application release and cannot use update commands.
 
-Core installations made before the mutation-key prompt was added need
-`PW_API_MUTATION_KEY` added securely to the root-controlled
-`/etc/nexus/nexus-core/.env`. `nexus update` preserves that file and will not
-ask for the key later.
+Upgrading from a beta installation made before the installer asked for the
+mutation key? Add `PW_API_MUTATION_KEY` to the root-controlled
+`/etc/nexus/nexus-core/.env` yourself. `nexus update` preserves that file and
+does not prompt for new keys.
 
 ## Update, rollback, and cleanup
 
@@ -66,10 +66,14 @@ sudo nexus channel beta
 sudo nexus channel stable
 ```
 
-The **stable** channel follows stable releases only. The **beta** channel also
-installs prereleases such as `v1.4.0-beta.1`, which get less testing. A new
-channel applies to the next `nexus update`. Switching back to stable never
-downgrades anything: components stay on their prereleases until a stable
+Installations use the **stable** channel by default, which is the right choice
+for a live alliance. The **beta** channel also installs prereleases such as
+`v1.4.0-beta.1`, which get less testing; use it on a test installation. To
+start a new installation on beta, run bootstrap with `-s -- --channel beta`
+after `sudo bash` and use `sudo nexus install --channel beta`.
+
+A channel change applies to the next `nexus update`. Switching back to stable
+never downgrades anything: components stay on their prereleases until a stable
 release is newer.
 
 ## Install and control components
@@ -86,9 +90,13 @@ sudo nexus component restart discord
 
 A component installed later gets the newest release on the host's channel that
 is compatible with the installed components. Install Subs only if it is absent
-on a Core host. It reuses Core's local
-configuration. Discord is optional: first create a Discord application and
-bot, then install it on a Core host. The command asks for its bot token,
+on a Core host; it reuses Core's local
+configuration.
+
+Discord is optional. First create a Discord application and bot and invite it
+to your server (steps 2–5 of the
+[Discord self-hosting guide](https://github.com/Yosodog/Nexus-AMS-Discord/blob/main/docs/self-hosting.md#2-create-the-discord-application)),
+then install it on a Core host. The command asks for its bot token,
 application ID, and guild ID. The IDs must be 17–20 digit numbers. Invite
 the bot to your guild separately. Managed install and update register its
 guild commands; a registration failure makes the operation fail. Core can be

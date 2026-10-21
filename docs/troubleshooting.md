@@ -21,8 +21,9 @@ UUID, inspect it with `sudo nexus operation show <uuid>`.
 - **Download or package error:** check outbound DNS and HTTPS access to GitHub
   Releases and the package repositories. Bootstrap downloads the latest
   published binary; it does not build a local checkout.
-- **No release found for the stable channel:** before the first stable
-  release, only beta releases exist. Rerun bootstrap with `--channel beta`.
+- **No release found:** bootstrap could not read the release list from
+  GitHub. Check access to `github.com` and `api.github.com` and retry. To
+  install a specific release, pass `-s -- --version vX.Y.Z` after `sudo bash`.
 - **Checksum mismatch:** the download was corrupted or altered. Retry; if it
   keeps failing, do not install that binary and report it.
 - **`nexus` cannot connect to the updater socket:** check

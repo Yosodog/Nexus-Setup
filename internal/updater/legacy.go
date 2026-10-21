@@ -257,7 +257,16 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := provisionPackages(ctx, platform, assessment.Profile); err != nil {
+	coreUsesRedis := false
+	if adoptsCore {
+		coreUsesRedis, err = coreEnvironmentUsesRedis(filepath.Join(legacyCorePath, ".env"))
+		if err != nil {
+			return errors.New("legacy Core environment file could not be read")
+		}
+		// Core consumes the Subs Redis stream.
+		coreUsesRedis = coreUsesRedis || subsStream != nil
+	}
+	if err := provisionPackages(ctx, platform, assessment.Profile, coreUsesRedis); err != nil {
 		return err
 	}
 	releases := NewGitHubReleaseClient()
@@ -410,8 +419,12 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		}
 	}
 
+	// Discord reaches Core through its public URL, which Nginx keeps routing
+	// to the legacy Core, in maintenance mode, until the switch. So Core and
+	// Subs are started and checked first, Nginx is switched to the managed
+	// Core, and only then is Discord started and checked against it.
 	services := hostServicesFor(config.Paths, state)
-	for _, component := range assessment.Components {
+	enableUnits := func(component Component) error {
 		units, unitErr := componentEnableUnits(component, services)
 		if unitErr != nil {
 			return unitErr
@@ -422,6 +435,13 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 			}
 			activatedUnits = append(activatedUnits, unit)
 		}
+		return nil
+	}
+	coreAndSubs := legacyAdoptionComponentsWithout(assessment.Components, ComponentDiscord)
+	for _, component := range coreAndSubs {
+		if err := enableUnits(component); err != nil {
+			return err
+		}
 	}
 	if adoptsCore {
 		if err := runFixedCommand(ctx, config.SystemctlBinary, []string{"enable", "--now", "nexus-scheduler.timer"}); err != nil {
@@ -429,13 +449,8 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 		}
 		activatedUnits = append(activatedUnits, "nexus-scheduler.timer")
 	}
-	if err := engine.healthCheck(ctx, assessment.Components, versions, services); err != nil {
+	if err := engine.healthCheck(ctx, coreAndSubs, versions, services); err != nil {
 		return err
-	}
-	if adoptsDiscord {
-		if err := engine.registerDiscordCommands(ctx); err != nil {
-			return err
-		}
 	}
 
 	if adoptsCore {
@@ -444,6 +459,17 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 			return err
 		}
 		nginxChanged = true
+	}
+	if adoptsDiscord {
+		if err := enableUnits(ComponentDiscord); err != nil {
+			return err
+		}
+		if err := engine.healthCheck(ctx, []Component{ComponentDiscord}, versions, services); err != nil {
+			return err
+		}
+		if err := engine.registerDiscordCommands(ctx); err != nil {
+			return err
+		}
 	}
 	disabledSupervisorConfigs, err = disableLegacySupervisor(ctx, supervisorConfigs)
 	if err != nil {
@@ -469,6 +495,18 @@ func AdoptLegacyInstallation(ctx context.Context) error {
 	completed = true
 	fmt.Printf("Legacy Nexus (%s) was adopted successfully. The original checkouts were preserved.\n", describeVersions(versions))
 	return nil
+}
+
+// legacyAdoptionComponentsWithout returns the adopted components except one,
+// keeping their order.
+func legacyAdoptionComponentsWithout(components []Component, excluded Component) []Component {
+	remaining := make([]Component, 0, len(components))
+	for _, component := range components {
+		if component != excluded {
+			remaining = append(remaining, component)
+		}
+	}
+	return remaining
 }
 
 func assertLegacyAdoptionTargetsAvailable(paths Paths, components []Component) error {
@@ -768,12 +806,44 @@ func parseLegacySupervisorConfig(contents []byte) ([]string, bool, error) {
 	return targets, true, nil
 }
 
+// legacySupervisorProgramMatches reports whether a program runs from a legacy
+// checkout: its directory is the checkout or inside it, its command names a
+// path in it, or a relative command argument resolves into it from the
+// program's directory.
 func legacySupervisorProgramMatches(directory, command string) bool {
+	if !filepath.IsAbs(directory) {
+		directory = ""
+	}
+	if directory != "" && insideLegacyCheckout(directory) {
+		return true
+	}
 	for _, root := range []string{legacyCorePath, legacySubsPath, legacyDiscordPath} {
-		if directory != "" && filepath.Clean(directory) == root {
+		if strings.Contains(command, root+"/") {
 			return true
 		}
-		if strings.Contains(command, root+"/") {
+	}
+	if directory == "" {
+		return false
+	}
+	for _, argument := range strings.Fields(command) {
+		argument = strings.Trim(argument, `"'`)
+		if argument == "" || filepath.IsAbs(argument) || strings.HasPrefix(argument, "-") {
+			continue
+		}
+		if insideLegacyCheckout(filepath.Join(directory, argument)) {
+			return true
+		}
+	}
+	return false
+}
+
+// insideLegacyCheckout reports whether an absolute path is a legacy checkout
+// or inside one. Paths are compared cleaned and by whole elements, so a
+// sibling such as /var/nexus-subs-other does not match.
+func insideLegacyCheckout(path string) bool {
+	path = filepath.Clean(path)
+	for _, root := range []string{legacyCorePath, legacySubsPath, legacyDiscordPath} {
+		if path == root || strings.HasPrefix(path, root+"/") {
 			return true
 		}
 	}

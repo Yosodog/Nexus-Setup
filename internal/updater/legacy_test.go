@@ -117,6 +117,48 @@ directory=/var/www/nexus
 	}
 }
 
+func TestLegacySupervisorProgramMatchesSubfoldersOfCheckouts(t *testing.T) {
+	cases := []struct {
+		name, directory, command string
+		matches                  bool
+	}{
+		{"checkout subfolder", "/var/nexus-subs/src", "/usr/bin/node index.js", true},
+		{"uncleaned subfolder", "/var/nexus-subs/./src/", "node index.js", true},
+		{"core subfolder", "/var/www/nexus/storage", "php ../artisan queue:work", true},
+		{"discord subfolder", "/opt/nexus-ams-discord/dist", "node bot.js", true},
+		{"relative command into checkout", "/var", "node nexus-subs/src/index.js", true},
+		{"quoted relative command", "/var/www", `php "nexus/artisan" queue:work`, true},
+		{"absolute command", "", "/usr/bin/node /var/nexus-subs/src/index.js", true},
+		{"sibling directory", "/var/nexus-subs-other", "node index.js", false},
+		{"sibling subfolder", "/var/nexus-subs-other/src", "node index.js", false},
+		{"relative command into sibling", "/var", "node nexus-subs-other/index.js", false},
+		{"parent of checkout", "/var/www", "php artisan queue:work", false},
+		{"relative directory", "nexus-subs", "node index.js", false},
+		{"unrelated program", "/srv/app", "node ../app/index.js", false},
+	}
+	for _, test := range cases {
+		if matched := legacySupervisorProgramMatches(test.directory, test.command); matched != test.matches {
+			t.Errorf("%s: directory=%q command=%q matched=%v, want %v", test.name, test.directory, test.command, matched, test.matches)
+		}
+	}
+}
+
+func TestLegacySupervisorDiscoveryFindsSubsRunningFromSubfolder(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "nexus-subs.conf"), `[program:nexus-subs]
+directory=/var/nexus-subs/src
+command=/usr/bin/node index.js
+autostart=true
+`)
+	configs, err := findLegacySupervisorConfigs(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configs) != 1 || !reflect.DeepEqual(configs[0].Targets, []string{"nexus-subs:*"}) {
+		t.Fatalf("Subs running from a checkout subfolder was not discovered: %#v", configs)
+	}
+}
+
 func TestLegacySupervisorDiscoveryToleratesMissingDirectory(t *testing.T) {
 	configs, err := findLegacySupervisorConfigs(filepath.Join(t.TempDir(), "absent"))
 	if err != nil || len(configs) != 0 {

@@ -36,6 +36,25 @@ if main --channel nightly 2>/dev/null; then
   exit 1
 fi
 
+# The EXIT trap runs after main has returned, under set -u.
+work_directory=$(mktemp -d)
+cleanup_output=$(bash -c '
+  set -Eeuo pipefail
+  NEXUS_BOOTSTRAP_LIBRARY=1 source "$1"
+  run() {
+    trap cleanup EXIT
+    download_directory=$(mktemp -d "$2/nexus-bootstrap.XXXXXXXX")
+  }
+  run "$@"
+' bootstrap "${bootstrap}" "${work_directory}" 2>&1)
+leftover=$(find "${work_directory}" -mindepth 1 -print -quit)
+rmdir "${work_directory}" 2>/dev/null
+if [[ -n ${cleanup_output} || -n ${leftover} ]]; then
+  echo "bootstrap did not clean up its download directory: ${cleanup_output}" >&2
+  exit 1
+fi
+
 echo 'ok - bootstrap installs a checksum-verified official Nexus CLI release'
 echo 'ok - bootstrap resolves stable, beta, and pinned releases'
+echo 'ok - bootstrap removes its download directory on exit'
 echo 'ok - legacy installer is retired'

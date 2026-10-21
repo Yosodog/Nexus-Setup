@@ -103,6 +103,23 @@ guild commands; a registration failure makes the operation fail. Core can be
 restarted, but it cannot be installed, enabled, or disabled as an optional
 component. Use `nexus component list` to see the actions available locally.
 
+`component restart core` restarts every Core unit: the `default` queue
+worker (`nexus-core.service`), the `sync` queue worker
+(`nexus-core-sync.service`), Pulse's server checks
+(`nexus-core-pulse-check.service`), and PHP-FPM. When Core's `.env` sets
+`PULSE_INGEST_DRIVER=redis`, `nexus-core-pulse-work.service` also runs; when
+Subs delivers through a Redis Stream, `nexus-core-subs-stream.service` runs
+`subs:consume-stream`. The scheduler runs from `nexus-scheduler.timer`. Updates
+and rollbacks restart and health-check the same units.
+
+New installations deliver Subs events to Core over HTTP. A host adopted from a
+legacy deployment that used `DELIVERY_DRIVER=redis-stream` keeps it: the
+installation state records the mode, so updates never switch it back to HTTP.
+Subs reads the stream's HMAC secret from
+`/etc/nexus/credentials/nexus-subs/redis-hmac-secret`; Core keeps its own
+`SUBS_REDIS_*` settings in `/etc/nexus/nexus-core/.env`, and the two must
+agree.
+
 The administrator's **Settings → Software** page offers the same local
 update, rollback, cleanup, and component actions if the account has
 `manage-system`. It cannot operate a remote component or a database-only

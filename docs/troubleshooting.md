@@ -83,8 +83,24 @@ sudo journalctl -u nexus-core.service -n 100 --no-pager
 ```
 
 Replace `nexus-core` with `nexus-subs` or `nexus-discord` for those
-components. Core also uses `nexus-core-php-fpm.service` and
-`nexus-scheduler.timer`; check them when web or scheduled work is failing.
+components. Core runs several units, and `component list` reports Core as
+unhealthy if any of them is down:
+
+| Unit | Runs |
+|---|---|
+| `nexus-core.service` | the `default` queue |
+| `nexus-core-sync.service` | the `sync` queue (nation, Discord role, and beige-alert syncs) |
+| `nexus-core-pulse-check.service` | `pulse:check` |
+| `nexus-core-pulse-work.service` | `pulse:work`, only when Core's `.env` sets `PULSE_INGEST_DRIVER=redis` |
+| `nexus-core-subs-stream.service` | `subs:consume-stream`, only when Subs delivers through a Redis Stream |
+| `nexus-core-php-fpm.service` | the web application |
+| `nexus-scheduler.timer` | scheduled work, every minute |
+
+If an update, rollback, or restart stops with "`<unit>` is not installed", the
+updater updated itself on a host whose service units are older than it. Run
+the bootstrap command from the [installation guide](getting-started.md) again;
+it installs the current units, enables the ones the host needs, and restarts
+Core's workers. Then retry the command.
 For a split installation, run these checks on the host where the component
 actually runs. `sudo nexus component restart <core|subs|discord>` is available
 for an installed local component after you fix its underlying error.
@@ -110,9 +126,39 @@ sudo journalctl -u "nexus-updater-worker@UUID.service" -n 100 --no-pager
 
 ## Legacy checkout detected
 
-`sudo nexus install` can adopt a recognized standard legacy deployment. It
-shows each detected component and its release and preserves the old checkout.
-Each checkout must be on a published release tag of its own repository.
+`sudo nexus install` can adopt a recognized standard legacy deployment: Core at
+`/var/www/nexus`, Subs at `/var/nexus-subs`, and the Discord bot at
+`/opt/nexus-ams-discord`. It shows each detected component and its release and
+preserves the old checkouts. Each checkout must be a clean clone of its official
+`Yosodog` repository, including no untracked files, on a published release tag
+of its own; the components do not need to share a tag. Core and the Discord bot
+also need a `.env`. A Discord bot can only be adopted together with Core.
+
+Adoption takes over everything the old deployment ran:
+
+- **Supervisor:** every program in `/etc/supervisor/conf.d/*.conf` whose
+  `directory=` is one of the checkouts, or whose `command=` runs a file inside
+  one, is stopped. Its configuration file is renamed with a `.nexus-disabled`
+  suffix once the managed services are healthy, which also disables any other
+  program in the same file.
+- **Discord:** the legacy `nexus-discord.service` is stopped and disabled, and
+  its unit file is renamed to `nexus-discord.service.nexus-disabled` before the
+  managed unit replaces it. The managed bot keeps the legacy bot's token,
+  application, guild, and relay identity, read from its `.env`; Core's
+  `DISCORD_*` settings are not changed.
+- **Subs delivery:** if the legacy Subs `.env` sets
+  `DELIVERY_DRIVER=redis-stream`, the managed Subs keeps delivering through that
+  Redis Stream and `nexus-core-subs-stream.service` consumes it. Core's `.env`
+  must have the same `SUBS_REDIS_HMAC_SECRET` and `SUBS_REDIS_STREAM` as Subs.
+- **Cron:** the `schedule:run` line for the legacy checkout is removed from
+  `/etc/crontab`.
+
+If any step fails, adoption stops the managed services and restores the
+Supervisor files, the legacy Discord unit, Nginx, and the crontab, then starts
+the legacy programs again. If it reports that a `.nexus-disabled` backup
+already exists, an earlier attempt left it behind: compare it with the active
+file and remove the one you do not need before retrying.
+
 If assessment fails or the installation is modified or unknown, stop and
 inspect that deployment before changing it. `install_nexus.sh` is retired;
 use the guided command instead.

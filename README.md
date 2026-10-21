@@ -96,4 +96,47 @@ longer installs anything.
 
 ## License
 
-GNU GPL v3. See [LICENSE](LICENSE).
+`requires` lists the minimum version of each other component (`nexus-core`,
+`nexus-subs`, `nexus-discord`) or of the updater (`nexus-updater`) that the
+release needs. Declare a requirement whenever a release depends on a newer API
+or behavior in another piece; the updater holds back a release until its
+requirements can be met, updates the required component in the same run when
+it can, and refuses a rollback that would break a requirement. Requirements on
+components that run on a different host (for example Core, from a Subs-only
+host) are not checked. Each component repository keeps its requirements in
+`nexus-release.requires.json`.
+
+Releases are installed directly at the newest compatible version, so
+intermediate releases do not need to stay published, but keep each Core
+migration safe to run after any earlier supported release. A failed test suite
+blocks publication. Verify a clean installation, update from the previous
+release, rollback, and cleanup on every supported OS image before publishing a
+stable release.
+
+The updater trusts official GitHub Releases. It verifies every download
+against the SHA-256 digest published with the release, which catches corrupt or
+substituted transfers, but it does not use TUF, release signatures, provenance
+enforcement, or automatic database backups.
+
+## Legacy installer
+
+`install_nexus.sh` is a fail-safe compatibility shim and no longer performs
+installations. Existing checkout adoption is handled by `nexus install`; it
+must preserve modified or unknown legacy deployments rather than overwrite
+them. Adoption covers Core (`/var/www/nexus`), Subs (`/var/nexus-subs`), and
+the Discord bot (`/opt/nexus-ams-discord`). It stops every Supervisor program
+that runs from those checkouts and the legacy `nexus-discord.service`, keeps the
+bot's relay identity and a Subs Redis Stream delivery, and restores all of it
+if adoption fails. See
+[Legacy checkout detected](docs/troubleshooting.md#legacy-checkout-detected).
+
+## Core services
+
+A Core host runs one systemd unit per long-running process:
+`nexus-core.service` (`default` queue), `nexus-core-sync.service` (`sync`
+queue), `nexus-core-pulse-check.service`, `nexus-core-php-fpm.service`, and
+`nexus-scheduler.timer`. `nexus-core-pulse-work.service` runs when Core's `.env`
+sets `PULSE_INGEST_DRIVER=redis`, and `nexus-core-subs-stream.service` runs when
+Subs delivers through a Redis Stream. Bootstrap installs the unit files;
+rerunning it on a managed host installs units added by a newer updater and
+enables the ones the host needs.

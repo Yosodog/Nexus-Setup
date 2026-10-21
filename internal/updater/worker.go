@@ -144,18 +144,21 @@ func operationTerminal(status OperationStatus) bool {
 	return status == OperationCompleted || status == OperationFailed || status == OperationRolledBack || status == OperationRecovery
 }
 
+// componentServiceUnit is the component's primary unit.
 func componentServiceUnit(component Component) (string, error) {
-	units, err := componentServiceUnits(component)
+	units, err := componentServiceUnits(component, hostServices{})
 	if err != nil {
 		return "", err
 	}
 	return units[0], nil
 }
 
-func componentServiceUnits(component Component) ([]string, error) {
+// componentServiceUnits lists every long-running unit a component needs on
+// this host; restarts, health checks, and status cover all of them.
+func componentServiceUnits(component Component, services hostServices) ([]string, error) {
 	switch component {
 	case ComponentCore:
-		return []string{"nexus-core.service", "nexus-core-php-fpm.service"}, nil
+		return append(coreWorkerUnits(services), corePHPFPMUnit), nil
 	case ComponentSubs:
 		return []string{"nexus-subs.service"}, nil
 	case ComponentDiscord:

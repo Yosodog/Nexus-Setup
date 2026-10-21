@@ -401,6 +401,7 @@ func (server *Server) checkUpdates(ctx context.Context) (UpdateData, error) {
 func (server *Server) componentData() []ComponentStatus {
 	state, _ := LoadInstallation(server.config.Paths)
 	canInstallOptional := state.Profile != "" && state.Profile != ProfileDatabaseOnly && state.Profile != ProfileSubsOnly
+	services := hostServicesFor(server.config.Paths, state)
 	statuses := make([]ComponentStatus, 0, 3)
 	for _, component := range []Component{ComponentCore, ComponentSubs, ComponentDiscord} {
 		record := state.Components[component]
@@ -415,7 +416,7 @@ func (server *Server) componentData() []ComponentStatus {
 				status.ConfigurationState = "incomplete"
 			}
 			if record.Enabled {
-				status.RuntimeState, status.HealthState, status.Reachable = server.componentRuntimeStatus(component, record.CurrentRelease)
+				status.RuntimeState, status.HealthState, status.Reachable = server.componentRuntimeStatus(component, record.CurrentRelease, services)
 				if !configurationReady && status.HealthState == "healthy" {
 					status.HealthState = "degraded"
 				}
@@ -465,8 +466,8 @@ func componentConfigurationReady(paths Paths, component Component) bool {
 	return true
 }
 
-func (server *Server) componentRuntimeStatus(component Component, release string) (string, string, bool) {
-	units, err := componentServiceUnits(component)
+func (server *Server) componentRuntimeStatus(component Component, release string, services hostServices) (string, string, bool) {
+	units, err := componentServiceUnits(component, services)
 	if err != nil {
 		return "unknown", "unknown", false
 	}

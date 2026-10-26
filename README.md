@@ -47,7 +47,7 @@ layouts.
 
 ```text
 nexus status
-nexus doctor
+nexus doctor [--fix]
 nexus update --check
 nexus update
 nexus rollback [core|subs|discord]

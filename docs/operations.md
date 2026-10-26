@@ -15,7 +15,8 @@ sudo nexus update --check
 
 `status` reports the profile, release channel, each component's current and
 previous release, component state, and recent operations.
-`doctor` checks installation state, disk space, and managed directories.
+`doctor` checks the updater's host setup, installation state, disk space, and
+managed directories; `sudo nexus doctor --fix` repairs the host setup.
 `component list` shows which local components are installed and healthy.
 `update --check` lists the release each component would move to, any newer
 release that is held back and why, and any newer `nexus` updater. Database-only

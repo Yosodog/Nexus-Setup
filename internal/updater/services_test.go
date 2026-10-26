@@ -65,6 +65,17 @@ func TestCoreUnitFilesRunEachQueueAndDaemon(t *testing.T) {
 	}
 }
 
+func TestSchedulerUnitKeepsBackgroundCommandsAlive(t *testing.T) {
+	unit := systemdUnits()["/etc/systemd/system/nexus-scheduler.service"]
+	// schedule:run exits right after forking runInBackground() commands; the
+	// default control-group kill would terminate them with the oneshot tick.
+	for _, directive := range []string{"Type=oneshot\n", "KillMode=process\n", "MemoryMax=512M\n", "TasksMax=128\n"} {
+		if !strings.Contains(unit, directive) {
+			t.Fatalf("scheduler unit is missing %q:\n%s", directive, unit)
+		}
+	}
+}
+
 func TestHostServicesReadPulseDriverAndSubsDelivery(t *testing.T) {
 	paths := NewTestPaths(t.TempDir())
 	state := InstallationState{Profile: ProfileAppWebSubsRemoteDB, SubsDelivery: SubsDeliveryRedisStream, Components: map[Component]InstalledComponent{

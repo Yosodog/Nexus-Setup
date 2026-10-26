@@ -19,6 +19,9 @@ template for extra `default` queue workers (`PartOf=nexus-core.service`),
 `nexus-core-pulse-work.service`
 (Redis Pulse ingest only), `nexus-core-subs-stream.service` (Subs Redis Stream
 delivery only), and `nexus-scheduler.service` with its timer.
+`nexus-scheduler.service` is a oneshot `schedule:run` tick with
+`KillMode=process`, so commands Laravel starts with `runInBackground()` keep
+running after the tick exits instead of being killed with its control group.
 
 The coordinator and worker cannot write `/etc/systemd/system`, so a unit added
 by a newer updater reaches an existing managed host when bootstrap runs again:

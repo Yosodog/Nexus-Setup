@@ -1256,8 +1256,9 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
 AmbientCapabilities=
-MemoryMax=256M
-TasksMax=64
+KillMode=process
+MemoryMax=512M
+TasksMax=128
 LimitNOFILE=2048
 `,
 		"/etc/systemd/system/nexus-scheduler.timer": `[Unit]

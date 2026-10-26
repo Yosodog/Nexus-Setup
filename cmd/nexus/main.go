@@ -70,6 +70,9 @@ func run(arguments []string) error {
 	}
 	jsonOutput := takeFlag(&arguments, "--json")
 	yes := takeFlag(&arguments, "--yes")
+	if len(arguments) > 0 && arguments[0] == "doctor" {
+		return runDoctor(arguments[1:], jsonOutput)
+	}
 	client, err := updater.NewClient(updater.DefaultPaths().SocketPath)
 	if err != nil {
 		return err
@@ -144,7 +147,7 @@ Commands:
   install                         Install or adopt Nexus
   update [--check] [--yes]        Check for or install updates
   status [--json]                 Show the installed release and services
-  doctor [--json]                 Run read-only host diagnostics
+  doctor [--fix] [--json]         Run host diagnostics
   rollback [component] [--yes]    Restore previous component releases
   cleanup [--yes]                 Remove old managed releases
   component list [--json]         List Core, Subs, and Discord
@@ -167,7 +170,7 @@ Mutation commands accept --yes for intentional non-interactive use.
 	case "status":
 		return "Usage: nexus status [--json]\n", nil
 	case "doctor":
-		return "Usage: nexus doctor [--json]\n", nil
+		return "Usage: nexus doctor [--fix] [--json]\n\nChecks the updater's host setup, installation state, disk space, and managed\ndirectories. The host checks run without the updater service, so they still\nreport when it cannot start. --fix rewrites the updater's boot-time directory\nconfiguration, recreates those directories, and restarts the control socket.\n", nil
 	case "rollback":
 		return "Usage: nexus rollback [core|subs|discord] [--yes]\n\nWithout a component, restores the previous release of every component the last\nupdate changed. With a component, restores only that component's previous\nrelease. Database migrations are not reversed.\n", nil
 	case "cleanup":
@@ -191,6 +194,65 @@ Mutation commands accept --yes for intentional non-interactive use.
 	default:
 		return "", fmt.Errorf("unknown help topic %q", topic)
 	}
+}
+
+// runDoctor runs the host checks locally before asking the coordinator for its
+// own checks, so a coordinator that cannot start is still diagnosed.
+func runDoctor(arguments []string, jsonOutput bool) error {
+	fix := takeFlag(&arguments, "--fix")
+	if len(arguments) != 0 {
+		return errors.New("usage: nexus doctor [--fix] [--json]")
+	}
+	host := updater.NewHostDoctor()
+	if fix {
+		if os.Geteuid() != 0 {
+			return errors.New("nexus doctor --fix must be run with sudo")
+		}
+		if err := host.Repair(context.Background()); err != nil {
+			return fmt.Errorf("host repair failed: %w", err)
+		}
+	}
+	data := updater.DoctorData{Checks: host.Checks(context.Background())}
+	hostHealthy := doctorChecksPass(data.Checks)
+	client, err := updater.NewClient(updater.DefaultPaths().SocketPath)
+	if err != nil {
+		return err
+	}
+	data.Checks = append(data.Checks, coordinatorDoctorChecks(client)...)
+	data.Healthy = doctorChecksPass(data.Checks)
+	encoded, err := json.MarshalIndent(data, "", "  ")
+	if jsonOutput {
+		encoded, err = json.Marshal(data)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	if !hostHealthy && !fix && !jsonOutput {
+		fmt.Fprintln(os.Stderr, "Run sudo nexus doctor --fix to repair the updater's host setup.")
+	}
+	return nil
+}
+
+func coordinatorDoctorChecks(client updater.Client) []updater.DoctorCheck {
+	response, err := call(client, updater.OperationDoctor, "", nil)
+	if err != nil {
+		return []updater.DoctorCheck{{Name: "coordinator_reachable", Passed: false, Message: "The updater coordinator did not answer: " + err.Error()}}
+	}
+	var coordinator updater.DoctorData
+	if err := updater.DecodeResponseData(response, &coordinator); err != nil {
+		return []updater.DoctorCheck{{Name: "coordinator_reachable", Passed: false, Message: "The updater coordinator sent an unreadable answer."}}
+	}
+	return coordinator.Checks
+}
+
+func doctorChecksPass(checks []updater.DoctorCheck) bool {
+	for _, check := range checks {
+		if !check.Passed {
+			return false
+		}
+	}
+	return true
 }
 
 func waitForOperation(client updater.Client, operationID string) error {
@@ -255,8 +317,6 @@ func commandRequest(arguments []string) (updater.Request, error) {
 	switch arguments[0] {
 	case "status":
 		return requestFor(updater.OperationGetStatus)
-	case "doctor":
-		return requestFor(updater.OperationDoctor)
 	case "update":
 		if len(arguments) == 2 && arguments[1] == "--check" {
 			return requestFor(updater.OperationCheckUpdates)

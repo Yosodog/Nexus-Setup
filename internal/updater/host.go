@@ -219,7 +219,10 @@ func ConfigureHost(ctx context.Context) error {
 	if err := reconcileCoreServices(ctx, "/usr/bin/systemctl", paths); err != nil {
 		return err
 	}
-	return runFixedCommand(ctx, "/usr/bin/systemctl", []string{"enable", "--now", "nexus-updater.socket"})
+	// A coordinator that kept failing leaves both units in a failed state that
+	// enable --now does not clear.
+	_ = runFixedCommand(ctx, "/usr/bin/systemctl", []string{"reset-failed", updaterServiceUnit, updaterSocketUnit})
+	return runFixedCommand(ctx, "/usr/bin/systemctl", []string{"enable", "--now", updaterSocketUnit})
 }
 
 func uniqueUint32(values []uint32) []uint32 {
@@ -1142,8 +1145,7 @@ func (engine DeploymentEngine) writeStandaloneSubsConfiguration(release string, 
 
 func systemdUnits() map[string]string {
 	units := map[string]string{
-		"/etc/tmpfiles.d/nexus-updater.conf": `d /run/nexus-updater 0750 root nexus-updater-control -
-`,
+		updaterTmpfilesPath: updaterTmpfiles(),
 		"/etc/systemd/system/nexus-updater.socket": `[Unit]
 Description=Nexus updater control socket
 After=systemd-tmpfiles-setup.service

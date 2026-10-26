@@ -1,1 +1,2 @@
 d /run/nexus-updater 0750 root nexus-updater-control -
+d /run/lock/nexus-updater 0700 root root -

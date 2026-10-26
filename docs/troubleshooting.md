@@ -8,8 +8,8 @@ sudo nexus doctor
 sudo nexus component list
 ```
 
-`doctor` checks local installation state, update disk space, and managed
-directories. It does not test DNS, remote database access, or every service;
+`doctor` checks the updater's host setup, local installation state, update
+disk space, and managed directories. It does not test DNS, remote database access, or every service;
 use the checks below for those failures. If a command printed an operation
 UUID, inspect it with `sudo nexus operation show <uuid>`.
 
@@ -108,6 +108,24 @@ Core's workers. Then retry the command.
 For a split installation, run these checks on the host where the component
 actually runs. `sudo nexus component restart <core|subs|discord>` is available
 for an installed local component after you fix its underlying error.
+
+## nexus commands report that control.sock is missing
+
+`dial unix /run/nexus-updater/control.sock: connect: no such file or directory`
+means the updater coordinator cannot start. Updaters before this fix did not
+recreate `/run/lock/nexus-updater` at boot, so the coordinator failed after
+every reboot. Running components are not affected. `doctor` still runs its host
+checks without the coordinator; repair the host setup with:
+
+```bash
+sudo nexus doctor --fix
+```
+
+It rewrites `/etc/tmpfiles.d/nexus-updater.conf`, recreates the updater's
+runtime directories, and restarts `nexus-updater.socket`. If `--fix` is
+unknown, the installed updater is older than the fix: run the bootstrap command
+from the [installation guide](getting-started.md) again, which installs the
+current updater and repairs the same setup.
 
 ## An update or other operation is interrupted
 

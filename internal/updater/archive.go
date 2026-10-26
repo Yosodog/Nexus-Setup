@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -112,10 +113,10 @@ func ExtractTarGz(reader io.Reader, destination string, limits ArchiveLimits) (E
 			if err := ensureParentsSafe(destination, target); err != nil {
 				return ExtractionResult{}, err
 			}
-			if err := os.MkdirAll(target, os.FileMode(header.Mode)&0777); err != nil {
+			if err := os.MkdirAll(target, releaseDirectoryMode); err != nil {
 				return ExtractionResult{}, fmt.Errorf("create archive directory %q: %w", header.Name, err)
 			}
-			if err := os.Chmod(target, os.FileMode(header.Mode)&0777); err != nil {
+			if err := normalizeParentModes(destination, target); err != nil {
 				return ExtractionResult{}, err
 			}
 			result.Directories++
@@ -129,17 +130,18 @@ func ExtractTarGz(reader io.Reader, destination string, limits ArchiveLimits) (E
 			if err := ensureParentsSafe(destination, target); err != nil {
 				return ExtractionResult{}, err
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(target), releaseDirectoryMode); err != nil {
 				return ExtractionResult{}, fmt.Errorf("create archive parents for %q: %w", header.Name, err)
 			}
 			if err := normalizeParentModes(destination, filepath.Dir(target)); err != nil {
 				return ExtractionResult{}, err
 			}
-			file, openErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, os.FileMode(header.Mode)&0777)
+			mode := releaseFileMode(os.FileMode(header.Mode))
+			file, openErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
 			if openErr != nil {
 				return ExtractionResult{}, fmt.Errorf("create archive file %q: %w", header.Name, openErr)
 			}
-			if err := file.Chmod(os.FileMode(header.Mode) & 0777); err != nil {
+			if err := file.Chmod(mode); err != nil {
 				_ = file.Close()
 				return ExtractionResult{}, err
 			}
@@ -169,6 +171,52 @@ func ExtractTarGz(reader io.Reader, destination string, limits ArchiveLimits) (E
 	return result, nil
 }
 
+// releaseDirectoryMode and releaseFileMode are the modes of every staged and
+// installed release path. They are set explicitly because the updater's units
+// run with UMask=0077, which would otherwise leave releases readable by root
+// only and stop the service accounts from starting them.
+const releaseDirectoryMode os.FileMode = 0755
+
+// releaseFileMode keeps whether an entry is executable but never lets a
+// release file be writable by anyone other than its owner, root.
+func releaseFileMode(mode os.FileMode) os.FileMode {
+	if mode.Perm()&0111 != 0 {
+		return 0755
+	}
+	return 0644
+}
+
+// normalizeReleaseModes repairs the modes of an existing release tree, such as
+// one an earlier updater staged under its 0077 umask. Symlinks are skipped:
+// Core links persistent state into its release, and that state keeps its own
+// modes.
+func normalizeReleaseModes(root string) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		var mode os.FileMode
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			return nil
+		case info.IsDir():
+			mode = releaseDirectoryMode
+		case info.Mode().IsRegular():
+			mode = releaseFileMode(info.Mode())
+		default:
+			return fmt.Errorf("release contains a special file %q", path)
+		}
+		if info.Mode()&(fs.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) == mode {
+			return nil
+		}
+		return os.Chmod(path, mode)
+	})
+}
+
 func normalizeParentModes(destination, directory string) error {
 	relative, err := filepath.Rel(destination, directory)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
@@ -186,7 +234,7 @@ func normalizeParentModes(destination, directory string) error {
 			continue
 		}
 		current = filepath.Join(current, part)
-		if err := os.Chmod(current, 0755); err != nil {
+		if err := os.Chmod(current, releaseDirectoryMode); err != nil {
 			return err
 		}
 	}

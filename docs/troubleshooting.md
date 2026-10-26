@@ -128,6 +128,23 @@ The worker's journal can show where a specific operation stopped. Replace
 sudo journalctl -u "nexus-updater-worker@UUID.service" -n 100 --no-pager
 ```
 
+### Subs or Discord updates roll back on updater v1.1.0
+
+Updater v1.1.0 installs the releases it downloads, and its own updates,
+readable by root only. It also leaves the old release in `NEXUS_RELEASE_ID` and
+`BUILD_COMMIT` in `/etc/nexus/nexus-subs/environment` and
+`/etc/nexus/nexus-discord/environment`. On such a host, every Subs or Discord
+update fails its health check and is rolled back. The unit's journal shows
+`status=200/CHDIR`, or the operation reports that the health release identity
+does not match the active release. After a self-update, `nexus` may also run
+only with `sudo`.
+
+`nexus update` changes components before it updates itself, so it cannot get
+past this on its own. Run the bootstrap command from the
+[installation guide](getting-started.md) once to install the current updater,
+then run `sudo nexus update` again. The current updater repairs the modes of
+releases it has already downloaded and writes the release ID on every switch.
+
 ## Legacy checkout detected
 
 `sudo nexus install` can adopt a recognized standard legacy deployment: Core at

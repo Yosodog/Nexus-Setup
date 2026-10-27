@@ -2,6 +2,9 @@ package updater
 
 import (
 	"context"
+	"errors"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,5 +59,40 @@ func TestWorkerUsesOnlyFixedServiceUnit(t *testing.T) {
 	}
 	if executor.calls[1][1] != "restart" || executor.calls[1][2] != "nexus-subs.service" {
 		t.Fatalf("unexpected service command: %#v", executor.calls[1])
+	}
+}
+
+func TestFixedCommandErrorIncludesOutputTail(t *testing.T) {
+	err := runFixedCommand(context.Background(), "/bin/sh", []string{"-c", "echo starting; echo 'runuser: cannot set user id: Operation not permitted' >&2; exit 1"})
+	if err == nil {
+		t.Fatal("a failing command returned no error")
+	}
+	if want := "exit status 1: starting runuser: cannot set user id: Operation not permitted"; err.Error() != want {
+		t.Fatalf("unexpected error %q, want %q", err, want)
+	}
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+		t.Fatalf("the exit status is no longer wrapped: %#v", err)
+	}
+}
+
+func TestFixedCommandErrorKeepsOnlyTheEndOfLongOutput(t *testing.T) {
+	err := runFixedCommand(context.Background(), "/bin/sh", []string{"-c", "i=0; while [ $i -lt 2000 ]; do echo line $i; i=$((i+1)); done; echo final reason >&2; exit 3"})
+	if err == nil {
+		t.Fatal("a failing command returned no error")
+	}
+	message := err.Error()
+	if !strings.HasPrefix(message, "exit status 3: ...") || !strings.HasSuffix(message, "line 1999 final reason") {
+		t.Fatalf("unexpected error %q", message)
+	}
+	if len(message) > len("exit status 3: ...")+commandOutputSummaryBytes {
+		t.Fatalf("error is longer than the summary limit: %d bytes", len(message))
+	}
+}
+
+func TestFixedCommandErrorWithoutOutputIsUnchanged(t *testing.T) {
+	err := runFixedCommand(context.Background(), "/bin/sh", []string{"-c", "exit 2"})
+	if err == nil || err.Error() != "exit status 2" {
+		t.Fatalf("unexpected error %v", err)
 	}
 }

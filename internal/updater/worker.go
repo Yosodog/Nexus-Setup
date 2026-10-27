@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type CommandExecutor interface {
@@ -31,9 +32,59 @@ func runFixedCommandInDirectory(ctx context.Context, directory, binary string, a
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0", "DEBIAN_FRONTEND=noninteractive"}
 	command.Dir = directory
 	command.Stdin = nil
-	command.Stdout = nil
-	command.Stderr = nil
-	return command.Run()
+	output := &tailBuffer{limit: commandOutputCaptureBytes}
+	command.Stdout = output
+	command.Stderr = output
+	if err := command.Run(); err != nil {
+		if summary := output.summary(); summary != "" {
+			return fmt.Errorf("%w: %s", err, summary)
+		}
+		return err
+	}
+	return nil
+}
+
+const (
+	commandOutputCaptureBytes = 4096
+	commandOutputSummaryBytes = 200
+)
+
+// tailBuffer keeps the last bytes a command wrote, so a failure can say why
+// without holding the full output of a long apt-get or migration run. Callers
+// never pass credentials as arguments, and only the output is reported.
+type tailBuffer struct {
+	limit int
+	data  []byte
+}
+
+func (buffer *tailBuffer) Write(p []byte) (int, error) {
+	buffer.data = append(buffer.data, p...)
+	if excess := len(buffer.data) - buffer.limit; excess > 0 {
+		buffer.data = append(buffer.data[:0], buffer.data[excess:]...)
+	}
+	return len(p), nil
+}
+
+// summary flattens the captured output onto one line and keeps its end, which
+// is where commands print the reason they failed. Operation errors are cut to
+// 256 bytes, so the summary stays short enough to follow "exit status N".
+func (buffer *tailBuffer) summary() string {
+	text := strings.ToValidUTF8(string(buffer.data), "")
+	text = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, text)
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) <= commandOutputSummaryBytes {
+		return text
+	}
+	text = text[len(text)-commandOutputSummaryBytes:]
+	for len(text) > 0 && !utf8.RuneStart(text[0]) {
+		text = text[1:]
+	}
+	return "..." + text
 }
 
 func validateFixedCommand(binary string, arguments []string) error {

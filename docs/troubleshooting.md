@@ -121,11 +121,37 @@ checks without the coordinator; repair the host setup with:
 sudo nexus doctor --fix
 ```
 
-It rewrites `/etc/tmpfiles.d/nexus-updater.conf`, recreates the updater's
-runtime directories, and restarts `nexus-updater.socket`. If `--fix` is
+It rewrites the updater's systemd units and `/etc/tmpfiles.d/nexus-updater.conf`,
+recreates the updater's runtime directories, and restarts `nexus-updater.socket`. If `--fix` is
 unknown, the installed updater is older than the fix: run the bootstrap command
 from the [installation guide](getting-started.md) again, which installs the
 current updater and repairs the same setup.
+
+## A Core update stops at "enter maintenance mode: exit status 1"
+
+Updaters up to v1.1.1 installed `nexus-updater-worker@.service` with
+`User=root` next to `NoNewPrivileges=yes`. On systemd 255 (Ubuntu 24.04) that
+pair starts the worker without `CAP_SETUID`, so `runuser -u nexus-core` fails
+with `runuser: cannot set user id: Operation not permitted` and every update
+that changes Core stops before maintenance mode. Discord- and Subs-only updates
+still work. Current updaters print the command's last output after the exit
+status, so the `runuser` message appears in the error itself.
+
+The update fails before the updater replaces itself, so a host stuck on an older
+updater cannot reach the fix through `nexus update`. Run the bootstrap command
+from the [installation guide](getting-started.md) again; it installs the current
+updater and its units. Then retry the update. On a host that already runs a
+fixed updater, `sudo nexus doctor` reports an outdated unit as `updater_units`,
+and this rewrites it:
+
+```bash
+sudo nexus doctor --fix
+```
+
+If you worked around the failure with a drop-in such as
+`/etc/systemd/system/nexus-updater-worker@.service.d/keep-setuid.conf` that
+clears `User=` and `Group=`, remove it once the rewritten unit is installed,
+then run `sudo systemctl daemon-reload`.
 
 ## An update or other operation is interrupted
 

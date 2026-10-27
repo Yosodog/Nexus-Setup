@@ -1143,6 +1143,10 @@ func (engine DeploymentEngine) writeStandaloneSubsConfiguration(release string, 
 	return chownPathToGroup(environmentPath, string(ComponentSubs), 0640)
 }
 
+// systemdUnits returns every unit file and tmpfiles entry bootstrap installs.
+// The updater's own units leave User= and Group= unset so they run as root by
+// default: systemd 255 starts a User=root service with NoNewPrivileges=yes
+// without CAP_SETUID, and the worker needs it to run Artisan through runuser.
 func systemdUnits() map[string]string {
 	units := map[string]string{
 		updaterTmpfilesPath: updaterTmpfiles(),
@@ -1167,8 +1171,6 @@ Requires=nexus-updater.socket
 
 [Service]
 ExecStart=/usr/local/bin/nexus internal coordinator
-User=root
-Group=root
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/run/nexus-updater /var/lib/nexus-updater /run/lock/nexus-updater
@@ -1202,8 +1204,6 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/nexus internal worker %i
-User=root
-Group=root
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/opt/nexus /etc/nexus /etc/nexus-updater /var/lib/nexus /var/lib/nexus-updater /run/nexus-updater /run/lock/nexus-updater /usr/local/libexec/nexus-updater /usr/local/bin

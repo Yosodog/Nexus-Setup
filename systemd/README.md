@@ -28,6 +28,13 @@ by a newer updater reaches an existing managed host when bootstrap runs again:
 `nexus internal configure-host` rewrites the units, enables the Core units the
 host needs, and restarts Core's workers. It leaves a legacy
 `nexus-discord.service` in place for adoption to back up.
+`sudo nexus doctor --fix` rewrites just the updater's own three units and
+reloads systemd, which is enough when only those changed.
+
+The coordinator and worker leave `User=` and `Group=` unset and run as root by
+default. With systemd 255, `User=root` together with `NoNewPrivileges=yes`
+starts the service without `CAP_SETUID`, and the worker then cannot run Artisan
+through `runuser -u nexus-core`.
 
 The worker receives only a validated operation UUID. Release repositories,
 assets, paths, units, executables, and command arguments are fixed in the

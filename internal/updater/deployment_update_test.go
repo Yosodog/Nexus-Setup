@@ -233,3 +233,101 @@ func TestRollbackRefusesIncompatibleResult(t *testing.T) {
 		t.Fatal("rollback left Subs on a release that needs newer Core")
 	}
 }
+
+func TestLeavingMaintenanceChecksDependentsAfterCoreIsUp(t *testing.T) {
+	paths := NewTestPaths(t.TempDir())
+	config := DefaultConfig()
+	config.Paths = paths
+	executor := &recordingExecutor{}
+	var artisanCalls []string
+	engine := DeploymentEngine{Config: config, Executor: executor}
+	engine.Artisan = func(_ context.Context, release string, arguments ...string) error {
+		artisanCalls = append(artisanCalls, release+" "+arguments[0])
+		if arguments[0] == "up" {
+			// Discord only reports ready once Core answers again.
+			writeTestHealthDocument(t, paths, ComponentDiscord, "v1.2.0", time.Now().UTC())
+		}
+		return nil
+	}
+	versions := map[Component]string{ComponentCore: "v1.1.0", ComponentDiscord: "v1.2.0"}
+	services := hostServicesFor(paths, InstallationState{})
+	started := time.Now()
+	if err := engine.verifyAndLeaveMaintenance(context.Background(), []Component{ComponentCore, ComponentDiscord}, versions, services, true); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(started) > 5*time.Second {
+		t.Fatal("Discord health was checked before Core left maintenance mode")
+	}
+	if len(artisanCalls) != 2 || artisanCalls[0] != "v1.1.0 migrate:status" || artisanCalls[1] != "v1.1.0 up" {
+		t.Fatalf("unexpected artisan calls: %v", artisanCalls)
+	}
+	last := executor.calls[len(executor.calls)-1]
+	if last[len(last)-1] != "nexus-discord-register.service" {
+		t.Fatalf("Discord commands were not registered last: %v", executor.calls)
+	}
+}
+
+func TestLeavingMaintenanceSkipsArtisanWhenCoreDidNotChange(t *testing.T) {
+	paths := NewTestPaths(t.TempDir())
+	config := DefaultConfig()
+	config.Paths = paths
+	engine := DeploymentEngine{Config: config, Executor: &recordingExecutor{}}
+	engine.Artisan = func(_ context.Context, _ string, arguments ...string) error {
+		t.Fatalf("artisan %v ran for a Subs-only change", arguments)
+		return nil
+	}
+	writeTestHealthDocument(t, paths, ComponentSubs, "v0.4.0", time.Now().UTC())
+	versions := map[Component]string{ComponentCore: "v1.1.0", ComponentSubs: "v0.4.0"}
+	if err := engine.verifyAndLeaveMaintenance(context.Background(), []Component{ComponentSubs}, versions, hostServicesFor(paths, InstallationState{}), false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type subsAndUpdaterProvider struct {
+	*fakeReleaseProvider
+	updater selfUpdateProvider
+	tag     string
+}
+
+func (provider subsAndUpdaterProvider) Releases(ctx context.Context, repository string, channel Channel) ([]ReleaseInfo, error) {
+	if repository == setupRepository {
+		return []ReleaseInfo{{Tag: provider.tag}}, nil
+	}
+	return provider.fakeReleaseProvider.Releases(ctx, repository, channel)
+}
+
+func (provider subsAndUpdaterProvider) Download(ctx context.Context, repository, tag, asset, destination string, maximum int64, progress func(int64, int64)) error {
+	if repository == setupRepository {
+		return provider.updater.Download(ctx, repository, tag, asset, destination, maximum, progress)
+	}
+	return provider.fakeReleaseProvider.Download(ctx, repository, tag, asset, destination, maximum, progress)
+}
+
+func TestUpdateInstallsNewerUpdaterBeforeComponents(t *testing.T) {
+	previousBuild := BuildVersion
+	BuildVersion = "v1.1.0"
+	t.Cleanup(func() { BuildVersion = previousBuild })
+	components := newFakeReleaseProvider()
+	components.publish(t, ComponentSubs, "v0.3.0", nil)
+	components.publish(t, ComponentSubs, "v0.4.0", nil)
+	provider := subsAndUpdaterProvider{
+		fakeReleaseProvider: components,
+		updater:             selfUpdateProvider{binary: []byte("#!/bin/sh\necho '{\"version\":\"v1.2.0\"}'\n")},
+		tag:                 "v1.2.0",
+	}
+	engine, operation := subsOnlyEngine(t, provider, "v0.3.0")
+	if err := engine.update(context.Background(), operation); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := LoadInstallation(engine.Config.Paths)
+	if state.Components[ComponentSubs].CurrentRelease != "v0.3.0" {
+		t.Fatalf("Subs changed before the updater updated itself: %+v", state.Components[ComponentSubs])
+	}
+	recorded, _ := engine.Store.Load(operation.ID)
+	if len(recorded.Releases) != 1 || recorded.Releases[0] != (ComponentRelease{Component: ComponentUpdater, Release: "v1.2.0"}) {
+		t.Fatalf("operation releases = %+v", recorded.Releases)
+	}
+	if target, err := os.Readlink(filepath.Join(engine.Config.Paths.UpdaterDir, "current")); err != nil || filepath.Base(target) != "v1.2.0" {
+		t.Fatalf("current updater link = %q, %v", target, err)
+	}
+}

@@ -37,6 +37,8 @@ type DeploymentEngine struct {
 	Store    *OperationStore
 	Releases ReleaseProvider
 	Executor CommandExecutor
+	// Artisan replaces the runuser call that runs Core's artisan; tests set it.
+	Artisan func(ctx context.Context, release string, arguments ...string) error
 }
 
 func (engine DeploymentEngine) Run(ctx context.Context, operation OperationState, configuration map[string]string) error {
@@ -83,12 +85,24 @@ func (engine DeploymentEngine) update(ctx context.Context, operation OperationSt
 	if err != nil {
 		return err
 	}
-	targets := make([]ComponentRelease, 0, len(plan.Changes)+1)
+	// A newer updater is installed on its own first, so the next update applies
+	// component changes with the fixed engine instead of this one.
+	if updater.Tag != "" {
+		if _, err := engine.Store.Update(operation.ID, func(current *OperationState) error {
+			current.Releases = []ComponentRelease{{Component: ComponentUpdater, Release: updater.Tag}}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := engine.updateSelf(ctx, operation.ID, updater.Tag); err != nil {
+			return err
+		}
+		_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"try-restart", "nexus-updater.service"})
+		return nil
+	}
+	targets := make([]ComponentRelease, 0, len(plan.Changes))
 	for _, change := range plan.Changes {
 		targets = append(targets, ComponentRelease{Component: change.Component, Release: change.To})
-	}
-	if updater.Tag != "" {
-		targets = append(targets, ComponentRelease{Component: ComponentUpdater, Release: updater.Tag})
 	}
 	if _, err := engine.Store.Update(operation.ID, func(current *OperationState) error {
 		current.Releases = targets
@@ -97,15 +111,7 @@ func (engine DeploymentEngine) update(ctx context.Context, operation OperationSt
 		return err
 	}
 	if len(plan.Changes) > 0 {
-		if err := engine.applyPlan(ctx, operation.ID, &installation, plan); err != nil {
-			return err
-		}
-	}
-	if updater.Tag != "" {
-		if err := engine.updateSelf(ctx, operation.ID, updater.Tag); err != nil {
-			return err
-		}
-		_ = engine.Executor.Run(ctx, engine.Config.SystemctlBinary, []string{"try-restart", "nexus-updater.service"})
+		return engine.applyPlan(ctx, operation.ID, &installation, plan)
 	}
 	return nil
 }
@@ -215,23 +221,45 @@ func (engine DeploymentEngine) applyPlan(ctx context.Context, operationID string
 	if err := engine.phase(operationID, PhaseHealthChecking); err != nil {
 		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
 	}
-	if err := engine.healthCheck(ctx, running, targets, services); err != nil {
+	if err := engine.verifyAndLeaveMaintenance(ctx, running, targets, services, coreChanged); err != nil {
 		return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
+	}
+	return engine.phase(operationID, PhaseFinalizing)
+}
+
+// verifyAndLeaveMaintenance checks Core, takes it out of maintenance, and only
+// then checks Subs and Discord. They report healthy once they can reach Core,
+// which answers 503 while it is down, so checking them earlier always fails.
+func (engine DeploymentEngine) verifyAndLeaveMaintenance(ctx context.Context, running []Component, versions map[Component]string, services hostServices, coreChanged bool) error {
+	core := intersectComponents(running, []Component{ComponentCore})
+	if err := engine.healthCheck(ctx, core, versions, services); err != nil {
+		return err
+	}
+	if coreChanged {
+		if err := engine.runArtisan(ctx, versions[ComponentCore], "up"); err != nil {
+			return fmt.Errorf("leave maintenance mode: %w", err)
+		}
+	}
+	dependents := intersectComponents(running, []Component{ComponentSubs, ComponentDiscord})
+	if err := engine.healthCheck(ctx, dependents, versions, services); err != nil {
+		return err
 	}
 	if containsComponent(running, ComponentDiscord) {
 		if err := engine.registerDiscordCommands(ctx); err != nil {
-			return engine.rollbackFailedPlan(ctx, installation, previous, changed, running, coreChanged)
+			return err
 		}
 	}
-	if err := leaveMaintenance(targets[ComponentCore]); err != nil {
-		return err
-	}
-	return engine.phase(operationID, PhaseFinalizing)
+	return nil
 }
 
 func (engine DeploymentEngine) rollbackFailedPlan(ctx context.Context, installation *InstallationState, previous InstallationState, changed, running []Component, coreChanged bool) error {
 	versions := installedVersions(previous)
 	services := hostServicesFor(engine.Config.Paths, previous)
+	if coreChanged {
+		// The new Core may already be out of maintenance. "down" succeeds when
+		// it is still down, and the restore below brings the old release up.
+		_ = engine.runArtisan(ctx, installedVersions(*installation)[ComponentCore], "down", "--retry=60")
+	}
 	if err := engine.switchComponents(changed, versions); err != nil {
 		return ErrRecoveryRequired
 	}
@@ -242,18 +270,8 @@ func (engine DeploymentEngine) rollbackFailedPlan(ctx context.Context, installat
 	if err := engine.restartComponents(ctx, running, services); err != nil {
 		return ErrRecoveryRequired
 	}
-	if err := engine.healthCheck(ctx, running, versions, services); err != nil {
+	if err := engine.verifyAndLeaveMaintenance(ctx, running, versions, services, coreChanged); err != nil {
 		return ErrRecoveryRequired
-	}
-	if containsComponent(running, ComponentDiscord) {
-		if err := engine.registerDiscordCommands(ctx); err != nil {
-			return ErrRecoveryRequired
-		}
-	}
-	if coreChanged {
-		if err := engine.runArtisan(ctx, versions[ComponentCore], "up"); err != nil {
-			return ErrRecoveryRequired
-		}
 	}
 	return ErrRolledBack
 }
@@ -535,6 +553,9 @@ func (engine DeploymentEngine) prepareCoreRelease(release string) error {
 }
 
 func (engine DeploymentEngine) runArtisan(ctx context.Context, release string, arguments ...string) error {
+	if engine.Artisan != nil {
+		return engine.Artisan(ctx, release, arguments...)
+	}
 	directory, err := componentReleaseDirectory(engine.Config.Paths, ComponentCore, release)
 	if err != nil {
 		return err
@@ -782,18 +803,8 @@ func (engine DeploymentEngine) rollback(ctx context.Context, operation Operation
 	if err := engine.restartComponents(ctx, running, services); err != nil {
 		return ErrRecoveryRequired
 	}
-	if err := engine.healthCheck(ctx, running, targets, services); err != nil {
+	if err := engine.verifyAndLeaveMaintenance(ctx, running, targets, services, coreChanged); err != nil {
 		return ErrRecoveryRequired
-	}
-	if containsComponent(running, ComponentDiscord) {
-		if err := engine.registerDiscordCommands(ctx); err != nil {
-			return ErrRecoveryRequired
-		}
-	}
-	if coreChanged {
-		if err := engine.runArtisan(ctx, targets[ComponentCore], "up"); err != nil {
-			return ErrRecoveryRequired
-		}
 	}
 	if engine.Store != nil {
 		return engine.Store.ResolveRecovery(operation.ID)

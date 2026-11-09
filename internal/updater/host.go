@@ -1024,7 +1024,7 @@ func provisionAdministrator(ctx context.Context, engine DeploymentEngine, releas
 		return err
 	}
 	artisan := filepath.Join(directory, "artisan")
-	arguments := []string{"-u", "nexus-core", "--", "/usr/bin/php", artisan, "nexus:provision-admin"}
+	arguments := runuserArtisanArguments("nexus-core", artisan, "nexus:provision-admin")
 	if err := validateFixedCommand("/usr/sbin/runuser", arguments); err != nil {
 		return err
 	}

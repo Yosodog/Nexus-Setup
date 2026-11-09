@@ -564,9 +564,16 @@ func (engine DeploymentEngine) runArtisan(ctx context.Context, release string, a
 	if _, err := os.Stat(artisan); err != nil {
 		return err
 	}
-	commandArguments := []string{"-u", "nexus-core", "--", "/usr/bin/php", artisan}
-	commandArguments = append(commandArguments, arguments...)
-	return runFixedCommandInDirectory(ctx, directory, "/usr/sbin/runuser", commandArguments)
+	return runFixedCommandInDirectory(ctx, directory, "/usr/sbin/runuser", runuserArtisanArguments("nexus-core", artisan, arguments...))
+}
+
+// runuserArtisanArguments builds the runuser arguments that run artisan as
+// account. The updater units set MemoryDenyWriteExecute, which PHP inherits, so
+// PCRE's JIT cannot allocate executable memory; the first regex it compiles
+// raises a warning that Laravel turns into a failed command. The JIT is off
+// for these commands only.
+func runuserArtisanArguments(account, artisan string, arguments ...string) []string {
+	return append([]string{"-u", account, "--", "/usr/bin/php", "-d", "pcre.jit=0", artisan}, arguments...)
 }
 
 func (engine DeploymentEngine) switchComponents(components []Component, versions map[Component]string) error {

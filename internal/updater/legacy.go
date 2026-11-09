@@ -551,9 +551,7 @@ func runLegacyArtisan(ctx context.Context, arguments ...string) error {
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("legacy Artisan entry point is unavailable")
 	}
-	commandArguments := []string{"-u", "www-data", "--", "/usr/bin/php", artisan}
-	commandArguments = append(commandArguments, arguments...)
-	return runFixedCommandInDirectory(ctx, legacyCorePath, "/usr/sbin/runuser", commandArguments)
+	return runFixedCommandInDirectory(ctx, legacyCorePath, "/usr/sbin/runuser", runuserArtisanArguments("www-data", artisan, arguments...))
 }
 
 func copyLegacyCoreState(paths Paths) error {

@@ -291,6 +291,9 @@ func waitForOperation(client updater.Client, operationID string) error {
 				if reclaimed, ok := operation.Metadata["reclaimed_bytes"].(float64); ok && reclaimed > 0 {
 					fmt.Printf("Reclaimed %.0f bytes.\n", reclaimed)
 				}
+				if release, ok := updaterOnlyRelease(operation); ok {
+					fmt.Printf("The Nexus updater is now %s. Run nexus update again to install any component updates.\n", release)
+				}
 				return nil
 			case "failed", "rolled_back", "recovery_required":
 				message := operation.ErrorMessage
@@ -489,6 +492,15 @@ func printResponse(response updater.Response, jsonOutput bool) error {
 	return nil
 }
 
+// updaterOnlyRelease reports the updater release a completed update installed
+// when that update changed nothing else.
+func updaterOnlyRelease(operation updater.OperationData) (string, bool) {
+	if operation.Operation != updater.OperationUpdate || len(operation.Releases) != 1 || operation.Releases[0].Component != updater.ComponentUpdater {
+		return "", false
+	}
+	return operation.Releases[0].Release, true
+}
+
 func printUpdateSummary(response updater.Response) (bool, error) {
 	var data updater.UpdateData
 	if err := updater.DecodeResponseData(response, &data); err != nil {
@@ -506,8 +518,8 @@ func printUpdateSummary(response updater.Response) (bool, error) {
 		fmt.Printf("  %-14s %s is held back: %s\n", held.Component, held.Release, held.Reason)
 		needsUpdater = needsUpdater || held.NeedsUpdater
 	}
-	if needsUpdater && data.UpdaterRelease != nil {
-		fmt.Println("Run nexus update again after this update finishes to install the held-back releases.")
+	if data.UpdaterRelease != nil && (len(data.Components) > 0 || needsUpdater) {
+		fmt.Println("The updater updates itself first. Run nexus update again after it finishes to install the component releases.")
 	}
 	if !data.UpdateAvailable {
 		fmt.Println("Nexus is up to date.")

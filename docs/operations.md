@@ -42,7 +42,9 @@ sudo nexus component list
 Core, Subs, and Discord are versioned separately. The updater moves each
 installed component straight to its newest release that is compatible with the
 others, runs forward-only database migrations when Core changes, activates the
-new code, and checks the changed components. A release that needs a newer
+new code, and checks the changed components. When Core changes, the updater
+checks Core first, takes it out of maintenance mode, and only then checks Subs
+and Discord, which need to reach Core to report healthy. A release that needs a newer
 version of another component is held back until that version is available;
 `update --check` shows the reason. If health checks fail after activation, the
 changed components switch back to their previous releases. Database migrations
@@ -53,8 +55,9 @@ because the health check expects the running process to report it. Releases
 are installed owned by root with directories and executables at `0755` and
 other files at `0644`, so the service accounts can read them but not change
 them. If the update finishes unsuccessfully, inspect the
-operation before retrying. When a held-back release needs a newer updater, run
-`sudo nexus update` again after the updater has updated itself.
+operation before retrying. When a newer updater is available, `sudo nexus update`
+installs only the updater first, so the new updater applies the component
+changes. Run `sudo nexus update` again after it finishes to install them.
 
 `sudo nexus rollback` restores the previous **code** release of every component
 the last update changed. `sudo nexus rollback subs` (or `core`, `discord`)

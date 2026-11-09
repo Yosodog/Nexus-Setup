@@ -153,6 +153,16 @@ If you worked around the failure with a drop-in such as
 clears `User=` and `Group=`, remove it once the rewritten unit is installed,
 then run `sudo systemctl daemon-reload`.
 
+### The error mentions "Allocation of JIT memory failed"
+
+The updater units set `MemoryDenyWriteExecute=yes`, which the PHP processes they
+start inherit, so PCRE's JIT cannot allocate executable memory. Updaters up to
+v1.1.3 ran artisan with the JIT on, so any command that compiled a new regex
+failed with `preg_match(): Allocation of JIT memory failed`; whether it hit
+`down`, `migrate`, or `up` varied by release. Current updaters run artisan with
+`-d pcre.jit=0`. Run `sudo nexus update` to install the current updater first,
+then run it again for the component updates.
+
 ## An update or other operation is interrupted
 
 If the CLI stopped waiting, first run `sudo nexus operation show <uuid>`; the

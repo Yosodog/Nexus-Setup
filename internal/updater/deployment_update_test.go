@@ -331,3 +331,16 @@ func TestUpdateInstallsNewerUpdaterBeforeComponents(t *testing.T) {
 		t.Fatalf("current updater link = %q, %v", target, err)
 	}
 }
+
+func TestArtisanRunsWithoutPCREJIT(t *testing.T) {
+	got := runuserArtisanArguments("nexus-core", "/opt/nexus/nexus-core/releases/v1.0.0/artisan", "down", "--retry=60")
+	want := []string{"-u", "nexus-core", "--", "/usr/bin/php", "-d", "pcre.jit=0", "/opt/nexus/nexus-core/releases/v1.0.0/artisan", "down", "--retry=60"}
+	if len(got) != len(want) {
+		t.Fatalf("arguments = %q", got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("arguments = %q", got)
+		}
+	}
+}

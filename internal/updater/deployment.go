@@ -39,6 +39,9 @@ type DeploymentEngine struct {
 	Executor CommandExecutor
 	// Artisan replaces the runuser call that runs Core's artisan; tests set it.
 	Artisan func(ctx context.Context, release string, arguments ...string) error
+	// ShareWithCore replaces the chown that gives the nexus-core group a path
+	// with mode; tests set it.
+	ShareWithCore func(path string, mode os.FileMode) error
 }
 
 func (engine DeploymentEngine) Run(ctx context.Context, operation OperationState, configuration map[string]string) error {
@@ -155,6 +158,15 @@ func (engine DeploymentEngine) applyPlan(ctx context.Context, operationID string
 		return nil
 	}
 	if coreChanged {
+		// The new release has its own cache directory, so its caches are built
+		// while the old release is still serving, before maintenance mode. A
+		// failure here leaves the site untouched.
+		if err := engine.prepareCoreRelease(targets[ComponentCore]); err != nil {
+			return err
+		}
+		if err := engine.cacheCoreRelease(ctx, targets[ComponentCore]); err != nil {
+			return err
+		}
 		if err := engine.phase(operationID, PhaseMaintenance); err != nil {
 			return err
 		}
@@ -162,12 +174,6 @@ func (engine DeploymentEngine) applyPlan(ctx context.Context, operationID string
 			return fmt.Errorf("enter maintenance mode: %w", err)
 		}
 		if err := engine.phase(operationID, PhaseMigrating); err != nil {
-			if upErr := leaveMaintenance(coreRelease); upErr != nil {
-				return upErr
-			}
-			return err
-		}
-		if err := engine.prepareCoreRelease(targets[ComponentCore]); err != nil {
 			if upErr := leaveMaintenance(coreRelease); upErr != nil {
 				return upErr
 			}
@@ -252,6 +258,10 @@ func (engine DeploymentEngine) verifyAndLeaveMaintenance(ctx context.Context, ru
 	return nil
 }
 
+// rollbackFailedPlan switches the changed components back after activation
+// failed. The previous Core release still has the caches it was running with in
+// its own cache directory, so switching back restores matching caches without
+// rebuilding them.
 func (engine DeploymentEngine) rollbackFailedPlan(ctx context.Context, installation *InstallationState, previous InstallationState, changed, running []Component, coreChanged bool) error {
 	versions := installedVersions(previous)
 	services := hostServicesFor(engine.Config.Paths, previous)
@@ -324,7 +334,7 @@ func (engine DeploymentEngine) stageComponent(ctx context.Context, operationID s
 		return err
 	}
 	if info, err := os.Lstat(target); err == nil && info.IsDir() {
-		if err := normalizeReleaseModes(target); err != nil {
+		if err := normalizeReleaseModes(target, componentWritableReleasePaths(component)...); err != nil {
 			return fmt.Errorf("repair %s %s file modes: %w", component, release, err)
 		}
 		return ValidateArtifactManifest(target, manifest)
@@ -512,15 +522,20 @@ func copyRegularTree(source, destination string) error {
 	})
 }
 
+// prepareCoreRelease links a Core release to the host's environment file and
+// writable storage, and gives it its own bootstrap/cache directory. Laravel's
+// cached config records the release directory's absolute paths, such as its
+// views, so a cache is only valid for the release that built it. Releases
+// staged by earlier updaters linked bootstrap/cache to one directory shared by
+// every release; that link is replaced here.
 func (engine DeploymentEngine) prepareCoreRelease(release string) error {
 	directory, err := componentReleaseDirectory(engine.Config.Paths, ComponentCore, release)
 	if err != nil {
 		return err
 	}
 	links := map[string]string{
-		filepath.Join(directory, ".env"):               filepath.Join(engine.Config.Paths.NexusConfigDir, string(ComponentCore), ".env"),
-		filepath.Join(directory, "storage"):            filepath.Join(engine.Config.Paths.DataDir, string(ComponentCore), "storage"),
-		filepath.Join(directory, "bootstrap", "cache"): filepath.Join(engine.Config.Paths.DataDir, string(ComponentCore), "bootstrap-cache"),
+		filepath.Join(directory, ".env"):    filepath.Join(engine.Config.Paths.NexusConfigDir, string(ComponentCore), ".env"),
+		filepath.Join(directory, "storage"): filepath.Join(engine.Config.Paths.DataDir, string(ComponentCore), "storage"),
 	}
 	for link, target := range links {
 		if filepath.Base(link) == ".env" {
@@ -529,7 +544,7 @@ func (engine DeploymentEngine) prepareCoreRelease(release string) error {
 			}
 		} else if err := os.MkdirAll(target, 0750); err != nil {
 			return err
-		} else if err := chownPathToGroup(target, "nexus-core", 0770); err != nil {
+		} else if err := engine.shareWithCore(target, 0770); err != nil {
 			return err
 		}
 		if err := os.MkdirAll(filepath.Dir(link), 0755); err != nil {
@@ -546,6 +561,95 @@ func (engine DeploymentEngine) prepareCoreRelease(release string) error {
 			return statErr
 		}
 		if err := os.Symlink(target, link); err != nil {
+			return err
+		}
+	}
+	cache := filepath.Join(directory, coreReleaseCachePath)
+	if info, statErr := os.Lstat(cache); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			if err := os.Remove(cache); err != nil {
+				return err
+			}
+		} else if !info.IsDir() {
+			return errors.New("managed release path bootstrap/cache is not a directory")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	if err := os.MkdirAll(cache, 0750); err != nil {
+		return err
+	}
+	// The cached config holds the application's secrets, so the directory
+	// stays closed to other accounts even though the release is world-readable.
+	return engine.shareWithCore(cache, 0770)
+}
+
+func (engine DeploymentEngine) shareWithCore(path string, mode os.FileMode) error {
+	if engine.ShareWithCore != nil {
+		return engine.ShareWithCore(path, mode)
+	}
+	return chownPathToGroup(path, "nexus-core", mode)
+}
+
+// coreReleaseCachePath is the directory, relative to a Core release, where
+// Laravel writes its config, route, event, package, and service caches. Each
+// release has its own; nexus-core writes to it. Compiled views go to the
+// shared storage, named after each view's path, so releases do not share them.
+var coreReleaseCachePath = filepath.Join("bootstrap", "cache")
+
+// coreCacheCommands build the caches every activated Core release runs with,
+// in order. The config cache comes first so the others boot with it, which
+// also proves the cached config loads.
+var coreCacheCommands = [][]string{{"config:cache"}, {"route:cache"}, {"event:cache"}, {"view:cache"}}
+
+// cacheCoreRelease builds fresh Laravel caches for a Core release that is not
+// serving yet. It starts from an empty cache directory, so the package and
+// service manifests are also regenerated from the release's own vendor tree.
+// If a command fails, the partial caches are removed again and the release is
+// left as it was staged; the caller fails before activating it.
+func (engine DeploymentEngine) cacheCoreRelease(ctx context.Context, release string) error {
+	if err := engine.clearCoreCaches(release); err != nil {
+		return fmt.Errorf("clear Core caches: %w", err)
+	}
+	if err := engine.runCoreCacheCommands(ctx, release); err != nil {
+		_ = engine.clearCoreCaches(release)
+		return err
+	}
+	return nil
+}
+
+// runCoreCacheCommands rebuilds the caches in place. Each command replaces
+// only its own cache, so a release that is serving keeps working while they
+// run.
+func (engine DeploymentEngine) runCoreCacheCommands(ctx context.Context, release string) error {
+	for _, arguments := range coreCacheCommands {
+		if err := engine.runArtisan(ctx, release, arguments...); err != nil {
+			return fmt.Errorf("build Core caches (%s): %w", arguments[0], err)
+		}
+	}
+	return nil
+}
+
+// clearCoreCaches empties a Core release's own cache directory.
+func (engine DeploymentEngine) clearCoreCaches(release string) error {
+	directory, err := componentReleaseDirectory(engine.Config.Paths, ComponentCore, release)
+	if err != nil {
+		return err
+	}
+	cache := filepath.Join(directory, coreReleaseCachePath)
+	info, err := os.Lstat(cache)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("Core release cache directory is not the release's own")
+	}
+	entries, err := os.ReadDir(cache)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(cache, entry.Name())); err != nil {
 			return err
 		}
 	}
@@ -779,6 +883,14 @@ func (engine DeploymentEngine) rollback(ctx context.Context, operation Operation
 		return err
 	}
 	if coreChanged {
+		// The .env may have changed since the release last ran, so the release
+		// being restored gets fresh caches before it is switched back in.
+		if err := engine.prepareCoreRelease(targets[ComponentCore]); err != nil {
+			return err
+		}
+		if err := engine.cacheCoreRelease(ctx, targets[ComponentCore]); err != nil {
+			return err
+		}
 		if err := engine.runArtisan(ctx, oldVersions[ComponentCore], "down", "--retry=60"); err != nil {
 			return fmt.Errorf("enter maintenance mode: %w", err)
 		}
@@ -893,7 +1005,9 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 	if err != nil {
 		return fmt.Errorf("read Core environment before component installation: %w", err)
 	}
+	coreRelease := state.Components[ComponentCore].CurrentRelease
 	configurationStarted := false
+	coreReloaded := false
 	completed := false
 	defer func() {
 		if completed {
@@ -915,7 +1029,8 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 		}
 		if configurationStarted {
 			_ = writeCoreEnvironmentBytes(coreEnvironmentPath, coreEnvironmentBefore)
-			if operation.Component == ComponentDiscord {
+			if coreReloaded {
+				_ = engine.runCoreCacheCommands(context.Background(), coreRelease)
 				_ = engine.restartComponents(context.Background(), []Component{ComponentCore}, services)
 			}
 		}
@@ -931,12 +1046,23 @@ func (engine DeploymentEngine) installComponent(ctx context.Context, operation O
 	if err := engine.writeComponentConfiguration(operation.Component, release, configuration, nil); err != nil {
 		return err
 	}
-	if operation.Component == ComponentDiscord {
+	// Discord adds its settings to Core's .env, and Subs may add the API token
+	// it calls Core with. Core reads its cached config, not the .env, so the
+	// caches are rebuilt before Core restarts to pick the change up.
+	coreEnvironmentAfter, err := readBoundedRegularFile(coreEnvironmentPath, 1024*1024)
+	if err != nil {
+		return fmt.Errorf("read Core environment after component configuration: %w", err)
+	}
+	if !bytes.Equal(coreEnvironmentBefore, coreEnvironmentAfter) {
+		coreReloaded = true
+		if err := engine.runCoreCacheCommands(ctx, coreRelease); err != nil {
+			return fmt.Errorf("reload Core %s configuration: %w", operation.Component, err)
+		}
 		if err := engine.restartComponents(ctx, []Component{ComponentCore}, services); err != nil {
-			return fmt.Errorf("reload Core Discord configuration: %w", err)
+			return fmt.Errorf("reload Core %s configuration: %w", operation.Component, err)
 		}
 		if err := engine.healthCheck(ctx, []Component{ComponentCore}, versions, services); err != nil {
-			return fmt.Errorf("verify Core after Discord configuration: %w", err)
+			return fmt.Errorf("verify Core after %s configuration: %w", operation.Component, err)
 		}
 	}
 	if err := atomicSwitchRelease(engine.Config.Paths, operation.Component, release); err != nil {
@@ -1505,6 +1631,13 @@ func (engine DeploymentEngine) restartComponent(ctx context.Context, component C
 	}
 	if err := recordActiveRelease(engine.Config.Paths, component, state.Components[component].CurrentRelease); err != nil {
 		return err
+	}
+	// Core reads its cached config rather than its .env, so a restart also
+	// rebuilds the caches; that is how an edit to the .env takes effect.
+	if component == ComponentCore {
+		if err := engine.runCoreCacheCommands(ctx, state.Components[component].CurrentRelease); err != nil {
+			return err
+		}
 	}
 	if err := engine.restartComponents(ctx, []Component{component}, services); err != nil {
 		return err

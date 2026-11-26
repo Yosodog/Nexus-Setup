@@ -163,6 +163,28 @@ failed with `preg_match(): Allocation of JIT memory failed`; whether it hit
 `-d pcre.jit=0`. Run `sudo nexus update` to install the current updater first,
 then run it again for the component updates.
 
+## Core ignores a change to its `.env`, or a cache command fails
+
+Core runs from Laravel's cached config, so it does not read
+`/etc/nexus/nexus-core/.env` on each request. After editing that file, run
+`sudo nexus component restart core`, which rebuilds the config, route, event,
+and view caches before restarting Core's units.
+
+If an update stops at "build Core caches (`route:cache`): exit status 1" or a
+similar message, the new release could not cache its configuration or routes.
+The updater stops before maintenance mode, removes the partial caches, and the
+old release keeps serving with its own caches. The worker's journal shows the
+command's output; the usual causes are a `.env` value the new release rejects
+or a release defect. Fix the cause and run `sudo nexus update` again.
+
+Updaters before this change linked every Core release's `bootstrap/cache` to
+one shared directory, `/var/lib/nexus/nexus-core/bootstrap-cache`, and never
+built caches. The first update with a current updater gives the new release its
+own cache directory; the previous release keeps the shared one, so switching
+back to it still finds the caches it ran with. A rollback to that release moves
+it to its own directory too. Once neither the current nor the previous release
+links to the shared directory, you can delete it.
+
 ## An update or other operation is interrupted
 
 If the CLI stopped waiting, first run `sudo nexus operation show <uuid>`; the

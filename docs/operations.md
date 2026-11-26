@@ -24,8 +24,10 @@ hosts have no application release and cannot use update commands.
 
 Upgrading from a beta installation made before the installer asked for the
 mutation key? Add `PW_API_MUTATION_KEY` to the root-controlled
-`/etc/nexus/nexus-core/.env` yourself. `nexus update` preserves that file and
-does not prompt for new keys.
+`/etc/nexus/nexus-core/.env` yourself, then run
+`sudo nexus component restart core`. Core runs from a cached config, so an edit
+to its `.env` takes effect only when the restart rebuilds that cache.
+`nexus update` preserves the file and does not prompt for new keys.
 
 ## Update, rollback, and cleanup
 
@@ -42,9 +44,21 @@ sudo nexus component list
 Core, Subs, and Discord are versioned separately. The updater moves each
 installed component straight to its newest release that is compatible with the
 others, runs forward-only database migrations when Core changes, activates the
-new code, and checks the changed components. When Core changes, the updater
-checks Core first, takes it out of maintenance mode, and only then checks Subs
-and Discord, which need to reach Core to report healthy. A release that needs a newer
+new code, and checks the changed components. When Core changes, the update runs
+in this order:
+
+1. Build the new release's Laravel config, route, event, and view caches while
+   the old release keeps serving. If a cache command fails, the update stops
+   here and the site is untouched.
+2. Put Core in maintenance mode and run the migrations with the new release.
+3. Switch `current` to the new release and restart Core's units: the queue
+   workers, then PHP-FPM, which load the new caches.
+4. Check Core, take it out of maintenance mode, and only then check Subs and
+   Discord, which need to reach Core to report healthy.
+
+Each Core release keeps its caches in its own `bootstrap/cache` directory,
+because Laravel's cached config records that release's paths. Switching back to
+an earlier release therefore finds the caches it last ran with. A release that needs a newer
 version of another component is held back until that version is available;
 `update --check` shows the reason. If health checks fail after activation, the
 changed components switch back to their previous releases. Database migrations
@@ -60,7 +74,9 @@ installs only the updater first, so the new updater applies the component
 changes. Run `sudo nexus update` again after it finishes to install them.
 
 `sudo nexus rollback` restores the previous **code** release of every component
-the last update changed. `sudo nexus rollback subs` (or `core`, `discord`)
+the last update changed. When it restores Core, it first rebuilds that
+release's caches from the current `.env`; if that fails, the rollback stops
+and the current release keeps serving. `sudo nexus rollback subs` (or `core`, `discord`)
 restores only that component. Rollback refuses to leave components on releases
 that are incompatible with each other. It does not restore the database. Check
 application and data compatibility before using it. To reclaim old managed releases, run
@@ -141,8 +157,11 @@ workers), the `sync` queue worker
 (`nexus-core-pulse-check.service`), and PHP-FPM. When Core's `.env` sets
 `PULSE_INGEST_DRIVER=redis`, `nexus-core-pulse-work.service` also runs; when
 Subs delivers through a Redis Stream, `nexus-core-subs-stream.service` runs
-`subs:consume-stream`. The scheduler runs from `nexus-scheduler.timer`. Updates
-and rollbacks restart and health-check the same units.
+`subs:consume-stream`. The scheduler runs from `nexus-scheduler.timer`. Before
+restarting them, it rebuilds Core's config, route, event, and view caches.
+Updates and rollbacks restart and health-check the same units. Installing Subs
+or Discord rebuilds Core's caches and restarts Core when it adds settings to
+Core's `.env`.
 
 Core's services, Artisan commands, and PHP-FPM all use the PHP that
 `/usr/bin/php` runs. Installation and adoption install versioned packages for

@@ -430,6 +430,9 @@ func InstallFresh(ctx context.Context, options InstallOptions) error {
 		if err := engine.prepareCoreRelease(versions[ComponentCore]); err != nil {
 			return err
 		}
+		if err := engine.cacheCoreRelease(ctx, versions[ComponentCore]); err != nil {
+			return err
+		}
 		if err := configurePHPFPM(ctx, config.Paths); err != nil {
 			return err
 		}

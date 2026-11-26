@@ -189,11 +189,21 @@ func releaseFileMode(mode os.FileMode) os.FileMode {
 // normalizeReleaseModes repairs the modes of an existing release tree, such as
 // one an earlier updater staged under its 0077 umask. Symlinks are skipped:
 // Core links persistent state into its release, and that state keeps its own
-// modes.
-func normalizeReleaseModes(root string) error {
+// modes. So are the writable directories named relative to root, which the
+// component's service account owns the contents of.
+func normalizeReleaseModes(root string, writable ...string) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if entry.IsDir() {
+			if relative, err := filepath.Rel(root, path); err == nil {
+				for _, skipped := range writable {
+					if relative == skipped {
+						return filepath.SkipDir
+					}
+				}
+			}
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -215,6 +225,15 @@ func normalizeReleaseModes(root string) error {
 		}
 		return os.Chmod(path, mode)
 	})
+}
+
+// componentWritableReleasePaths lists the directories inside a component's
+// release that its service account writes to.
+func componentWritableReleasePaths(component Component) []string {
+	if component == ComponentCore {
+		return []string{coreReleaseCachePath}
+	}
+	return nil
 }
 
 func normalizeParentModes(destination, directory string) error {

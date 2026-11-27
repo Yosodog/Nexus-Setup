@@ -62,6 +62,7 @@ func newCoreCacheHost(t *testing.T) *coreCacheHost {
 		Releases:      provider,
 		Executor:      sequenceExecutor{log: host.log},
 		ShareWithCore: func(path string, mode os.FileMode) error { return os.Chmod(path, mode) },
+		CoreIdentity:  func() (int, int, error) { return os.Getuid(), os.Getgid(), nil },
 		Artisan:       host.artisan,
 	}
 	environment := filepath.Join(paths.NexusConfigDir, string(ComponentCore), ".env")
@@ -183,6 +184,10 @@ func TestCoreUpdateBuildsNewReleaseCachesBeforeMaintenance(t *testing.T) {
 		t.Fatalf("caches were not built before the switch: current %s, built while %q served", host.currentRelease(t), host.cachedFrom["v1.1.0"])
 	}
 	assertOwnCacheDirectory(t, host.paths, "v1.1.0")
+	// The scheduler unit's TMPDIR must exist for every Core release it runs.
+	if info, err := os.Lstat(coreTempDirectory(host.paths)); err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		t.Fatalf("Core temp directory was not prepared: %v %v", info, err)
+	}
 	if got := host.cachedConfig(t, "v1.1.0"); got != "v1.1.0" {
 		t.Fatalf("v1.1.0 config cache = %q", got)
 	}

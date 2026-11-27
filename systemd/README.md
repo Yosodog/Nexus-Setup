@@ -22,6 +22,10 @@ delivery only), and `nexus-scheduler.service` with its timer.
 `nexus-scheduler.service` is a oneshot `schedule:run` tick with
 `KillMode=process`, so commands Laravel starts with `runInBackground()` keep
 running after the tick exits instead of being killed with its control group.
+Those commands outlive the tick's `PrivateTmp=yes` /tmp, which systemd deletes
+when the tick exits, so the unit sets `TMPDIR=/var/lib/nexus/nexus-core/tmp`.
+Install, `configure-host`, and every Core install or update create that
+directory as `nexus-core:nexus-core` with mode 0700.
 
 The coordinator and worker cannot write `/etc/systemd/system`, so a unit added
 by a newer updater reaches an existing managed host when bootstrap runs again:

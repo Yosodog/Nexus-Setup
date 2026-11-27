@@ -42,6 +42,9 @@ type DeploymentEngine struct {
 	// ShareWithCore replaces the chown that gives the nexus-core group a path
 	// with mode; tests set it.
 	ShareWithCore func(path string, mode os.FileMode) error
+	// CoreIdentity replaces the nexus-core account lookup that owns Core's
+	// persistent temp directory; tests set it.
+	CoreIdentity func() (uid, gid int, err error)
 }
 
 func (engine DeploymentEngine) Run(ctx context.Context, operation OperationState, configuration map[string]string) error {
@@ -564,6 +567,9 @@ func (engine DeploymentEngine) prepareCoreRelease(release string) error {
 			return err
 		}
 	}
+	if err := engine.ensureCoreTempDirectory(); err != nil {
+		return err
+	}
 	cache := filepath.Join(directory, coreReleaseCachePath)
 	if info, statErr := os.Lstat(cache); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -582,6 +588,20 @@ func (engine DeploymentEngine) prepareCoreRelease(release string) error {
 	// The cached config holds the application's secrets, so the directory
 	// stays closed to other accounts even though the release is world-readable.
 	return engine.shareWithCore(cache, 0770)
+}
+
+// ensureCoreTempDirectory creates the TMPDIR that the scheduler unit gives
+// Core's background scheduled commands.
+func (engine DeploymentEngine) ensureCoreTempDirectory() error {
+	identity := coreIdentity
+	if engine.CoreIdentity != nil {
+		identity = engine.CoreIdentity
+	}
+	uid, gid, err := identity()
+	if err != nil {
+		return err
+	}
+	return ensureOwnedDirectory(coreTempDirectory(engine.Config.Paths), uid, gid, 0700)
 }
 
 func (engine DeploymentEngine) shareWithCore(path string, mode os.FileMode) error {

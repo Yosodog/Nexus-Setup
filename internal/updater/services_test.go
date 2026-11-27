@@ -76,6 +76,79 @@ func TestSchedulerUnitKeepsBackgroundCommandsAlive(t *testing.T) {
 	}
 }
 
+func TestSchedulerUnitGivesBackgroundCommandsAPersistentTempDirectory(t *testing.T) {
+	unit := systemdUnits()["/etc/systemd/system/nexus-scheduler.service"]
+	// The tick's PrivateTmp is deleted when it exits, while its background
+	// children keep running, so TMPDIR must point at a directory that is
+	// writable in the sandbox and outlives the tick.
+	tempDirectory := coreTempDirectory(DefaultConfig().Paths)
+	if tempDirectory != "/var/lib/nexus/nexus-core/tmp" {
+		t.Fatalf("unexpected Core temp directory %q", tempDirectory)
+	}
+	for _, directive := range []string{"Environment=TMPDIR=" + tempDirectory + "\n", "PrivateTmp=yes\n", "ProtectSystem=strict\n", "ReadWritePaths=/var/lib/nexus/nexus-core\n"} {
+		if !strings.Contains(unit, directive) {
+			t.Fatalf("scheduler unit is missing %q:\n%s", directive, unit)
+		}
+	}
+}
+
+func TestOnlyTheSchedulerLetsChildrenOutliveTheUnit(t *testing.T) {
+	// Any other unit that keeps children alive past its own exit with a
+	// private /tmp needs the same persistent TMPDIR as the scheduler.
+	for path, content := range systemdUnits() {
+		if !strings.Contains(content, "KillMode=process\n") {
+			continue
+		}
+		if path != "/etc/systemd/system/nexus-scheduler.service" {
+			t.Fatalf("%s uses KillMode=process; give it a persistent TMPDIR and extend this test", path)
+		}
+	}
+}
+
+func TestEnsureOwnedDirectoryIsRepeatableAndRefusesLinks(t *testing.T) {
+	root := t.TempDir()
+	uid, gid := os.Getuid(), os.Getgid()
+	directory := filepath.Join(root, "tmp")
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := ensureOwnedDirectory(directory, uid, gid, 0700); err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+		info, err := os.Lstat(directory)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+			t.Fatalf("attempt %d: unexpected directory %v %v", attempt, info, err)
+		}
+	}
+	if err := os.Chmod(directory, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureOwnedDirectory(directory, uid, gid, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(directory); err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("a loosened mode was not restored: %v %v", info, err)
+	}
+
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureOwnedDirectory(link, uid, gid, 0700); err == nil {
+		t.Fatal("a symlink was followed")
+	}
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0755 {
+		t.Fatalf("the symlink target was changed: %v %v", info, err)
+	}
+	file := filepath.Join(root, "file")
+	writeTestFile(t, file, "")
+	if err := ensureOwnedDirectory(file, uid, gid, 0700); err == nil {
+		t.Fatal("a regular file was accepted as the directory")
+	}
+}
+
 func TestHostServicesReadPulseDriverAndSubsDelivery(t *testing.T) {
 	paths := NewTestPaths(t.TempDir())
 	state := InstallationState{Profile: ProfileAppWebSubsRemoteDB, SubsDelivery: SubsDeliveryRedisStream, Components: map[Component]InstalledComponent{

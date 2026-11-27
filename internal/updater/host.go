@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -187,6 +188,11 @@ func ConfigureHost(ctx context.Context) error {
 		}
 		if err := chownPathToGroup(dataDirectory, account, 0770); err != nil {
 			return err
+		}
+		if account == "nexus-core" {
+			if err := ensureCoreTempDirectory(paths); err != nil {
+				return err
+			}
 		}
 		configDirectory := filepath.Join(paths.NexusConfigDir, account)
 		if err := os.MkdirAll(configDirectory, 0750); err != nil {
@@ -1112,6 +1118,59 @@ func chownPathToGroup(path, groupName string, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
+// coreTempDirectoryName is the directory under Core's data directory that the
+// scheduler unit points TMPDIR at. Commands that schedule:run starts with
+// runInBackground() outlive the oneshot tick because of KillMode=process, but
+// systemd deletes the tick's PrivateTmp when it exits, after which tmpfile()
+// fails in those commands. The data directory is already writable inside the
+// sandbox and survives the tick.
+const coreTempDirectoryName = "tmp"
+
+func coreTempDirectory(paths Paths) string {
+	return filepath.Join(paths.DataDir, string(ComponentCore), coreTempDirectoryName)
+}
+
+// ensureCoreTempDirectory creates Core's persistent temp directory, owned by
+// nexus-core with mode 0700. It is safe to run on every install and update.
+func ensureCoreTempDirectory(paths Paths) error {
+	return DeploymentEngine{Config: Config{Paths: paths}}.ensureCoreTempDirectory()
+}
+
+func coreIdentity() (int, int, error) {
+	account, err := user.Lookup("nexus-core")
+	if err != nil {
+		return 0, 0, err
+	}
+	uid, err := parseIdentity(account.Uid)
+	if err != nil {
+		return 0, 0, err
+	}
+	gid, err := parseIdentity(account.Gid)
+	if err != nil {
+		return 0, 0, err
+	}
+	return uid, gid, nil
+}
+
+// ensureOwnedDirectory creates path if needed and sets its owner and mode
+// through a no-follow handle. The parent may be writable by the service
+// account, so a symlink or file planted at path is refused instead of being
+// followed by a root chown.
+func ensureOwnedDirectory(path string, uid, gid int, mode os.FileMode) error {
+	if err := os.Mkdir(path, mode); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	directory, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return fmt.Errorf("%s must be a directory: %w", path, err)
+	}
+	defer directory.Close()
+	if err := directory.Chown(uid, gid); err != nil {
+		return err
+	}
+	return directory.Chmod(mode)
+}
+
 func (engine DeploymentEngine) writeStandaloneSubsConfiguration(release string, options InstallOptions, stream *subsRedisStream) error {
 	pwPath, err := engine.writeCredential(ComponentSubs, "pw-api-token", options.PWAPIKey)
 	if err != nil {
@@ -1241,6 +1300,7 @@ User=nexus-core
 Group=nexus-core
 WorkingDirectory=/opt/nexus/nexus-core/current
 ExecStart=/usr/bin/php /opt/nexus/nexus-core/current/artisan schedule:run
+Environment=TMPDIR=/var/lib/nexus/nexus-core/tmp
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/nexus/nexus-core
